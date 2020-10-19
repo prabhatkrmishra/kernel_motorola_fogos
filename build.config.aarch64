@@ -1,5 +1,7 @@
 ARCH=arm64
 
+LLVM_IAS=1
+
 CLANG_TRIPLE=aarch64-linux-gnu-
 CROSS_COMPILE=aarch64-linux-androidkernel-
 CROSS_COMPILE_COMPAT=arm-linux-androideabi-
