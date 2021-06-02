@@ -431,7 +431,7 @@ OBJDUMP		= llvm-objdump
 READELF		= llvm-readelf
 OBJSIZE		= llvm-size
 STRIP		= llvm-strip
-KBUILD_HOSTLDFLAGS	+= -fuse-ld=lld --rtlib=compiler-rt
+KBUILD_HOSTLDFLAGS	+= -fuse-ld=lld
 
 else
 REAL_CC		= $(CROSS_COMPILE)gcc
