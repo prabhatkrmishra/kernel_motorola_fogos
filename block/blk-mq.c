@@ -1550,12 +1550,26 @@ bool blk_mq_run_hw_queue(struct blk_mq_hw_ctx *hctx, bool async)
 		blk_mq_hctx_has_pending(hctx);
 	hctx_unlock(hctx, srcu_idx);
 
-	if (need_run) {
-		__blk_mq_delay_run_hw_queue(hctx, async, 0);
-		return true;
+	if (!need_run) {
+		unsigned long flags;
+
+		/*
+		 * Synchronize with blk_mq_unquiesce_queue(), because we
+		 * check if hw queue is quiesced locklessly above, we need
+		 * the use ->queue_lock to make sure we see the up-to-date
+		 * status to not miss rerunning the hw queue.
+		 */
+		spin_lock_irqsave(&hctx->queue->queue_lock, flags);
+		need_run = !blk_queue_quiesced(hctx->queue) &&
+			blk_mq_hctx_has_pending(hctx);
+		spin_unlock_irqrestore(&hctx->queue->queue_lock, flags);
+
+		if (!need_run)
+			return false;
 	}
 
-	return false;
+	__blk_mq_delay_run_hw_queue(hctx, async, 0);
+	return true;
 }
 EXPORT_SYMBOL(blk_mq_run_hw_queue);
 
