@@ -1935,6 +1935,14 @@ insert:
 
 	blk_mq_sched_insert_request(rq, false, run_queue, false);
 
+	/*
+	 * When queue is stopped or quiesced, the inserted request may not be
+	 * dispatched until the queue is rerun. Run the queue explicitly so that
+	 * requests are not lost when the queue is started or unquiesced later.
+	 */
+	if (!run_queue)
+		blk_mq_run_hw_queue(hctx, false);
+
 	return BLK_STS_OK;
 }
 
