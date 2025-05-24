@@ -387,6 +387,9 @@ choice
 	  Select the queueing discipline that will be used by default
 	  for all network devices.
 
+	config DEFAULT_CAKE
+		bool "Common Applications Kept Enhanced (CAKE)"
+
 	config DEFAULT_FQ
 		bool "Fair Queue" if NET_SCH_FQ
 
@@ -401,10 +404,12 @@ choice
 
 	config DEFAULT_PFIFO_FAST
 		bool "Priority FIFO Fast"
+
 endchoice
 
 config DEFAULT_NET_SCH
 	string
+	default "cake" if DEFAULT_CAKE
 	default "pfifo_fast" if DEFAULT_PFIFO_FAST
 	default "fq" if DEFAULT_FQ
 	default "fq_codel" if DEFAULT_FQ_CODEL
