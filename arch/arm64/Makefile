@@ -47,14 +47,14 @@ $(warning Detected assembler with broken .inst; disassembly will be unreliable)
 endif
 
 ifdef CONFIG_CC_IS_CLANG
-KBUILD_CFLAGS	+= -mno-implicit-float
-
 # SM6375 (Snapdragon 6s Gen 3): Cortex-A78 (big) + Cortex-A55 (LITTLE), ARMv8.2-A.
 # ISA extensions the chip implements.
 KBUILD_CFLAGS	+= -march=armv8.2-a+simd+fp16+dotprod+crypto+aes+sha2+crc
 KBUILD_CFLAGS	+= -mcpu=generic
 KBUILD_AFLAGS	+= -march=armv8.2-a+simd+fp16+dotprod+crypto+aes+sha2+crc
 KBUILD_AFLAGS	+= -mcpu=generic
+
+KBUILD_CFLAGS	+= -mno-implicit-float
 
 else
 KBUILD_CFLAGS	+= -mgeneral-regs-only

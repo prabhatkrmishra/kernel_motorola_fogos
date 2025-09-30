@@ -764,6 +764,16 @@ else ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
 KBUILD_CFLAGS += -Os
 endif
 
+ifeq ($(CONFIG_LD_IS_LLD), y)
+ifdef CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+KBUILD_LDFLAGS  += --lto-O2
+else ifdef CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3
+KBUILD_LDFLAGS  += --lto-O3
+else ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
+KBUILD_LDFLAGS  += --lto
+endif
+endif
+
 # Tell gcc to never replace conditional load with a non-conditional one
 KBUILD_CFLAGS	+= $(call cc-option,--param=allow-store-data-races=0)
 KBUILD_CFLAGS	+= $(call cc-option,-fno-allow-store-data-races)
