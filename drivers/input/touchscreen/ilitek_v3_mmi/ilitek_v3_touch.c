@@ -211,7 +211,7 @@ static void dma_trigger_reg_setting(u32 reg_dest_addr, u32 flash_start_addr, u32
 			break;
 
 		retry--;
-		usleep_range(1000, 1000);
+		usleep_range(1000, 1200);
 	}
 
 	if (retry <= 0)
@@ -222,7 +222,7 @@ static void dma_trigger_reg_setting(u32 reg_dest_addr, u32 flash_start_addr, u32
 	if (ili_ice_mode_write(FLASH0_reg_flash_csb, 0x1, 1) < 0)
 		ILI_ERR("Pull CS High failed\n");
 	/* waiting for CS status done */
-	mdelay(10);
+	usleep_range(10000, 10500);
 }
 
 int ili_move_mp_code_flash(void)
@@ -320,7 +320,7 @@ int ili_move_mp_code_flash(void)
 					break;
 
 				retry--;
-				usleep_range(10000, 10000);
+				usleep_range(10000, 10500);
 			}
 
 			if (retry <= 0)
@@ -350,7 +350,7 @@ int ili_move_mp_code_flash(void)
 					break;
 
 				retry--;
-				usleep_range(10000, 10000);
+				usleep_range(10000, 10500);
 			}
 
 			if (retry <= 0)
@@ -361,7 +361,7 @@ int ili_move_mp_code_flash(void)
 				ILI_ERR("Pull CS High failed\n");
 
 			/* waiting for CS status done */
-			mdelay(10);
+			usleep_range(10000, 10500);
 		}
 	}
 
@@ -595,7 +595,7 @@ int ili_move_gesture_code_iram(int mode)
 			ILI_INFO("Ready to load gesture code\n");
 			break;
 		}
-		mdelay(2);
+		usleep_range(2000, 2200);
 	}
 	ili_irq_disable();
 
@@ -728,7 +728,7 @@ int ili_touch_esd_gesture_flash(void)
 			if (slave_answer != ges_run)
 				ILI_INFO("ret = 0x%X, slave_answer = 0x%X\n", slave_answer, ges_run);
 
-			mdelay(2);
+			usleep_range(2000, 2200);
 		} while (slave_answer != ges_run && --retry > 0);
 	}
 
@@ -744,7 +744,7 @@ int ili_touch_esd_gesture_flash(void)
 		if (answer != ges_run)
 			ILI_INFO("ret = 0x%X, slave_answer = 0x%X\n", answer, ges_run);
 
-		mdelay(2);
+		usleep_range(2000, 2200);
 	} while (answer != ges_run && --retry > 0);
 
 	if (retry <= 0) {
@@ -843,7 +843,7 @@ int ili_touch_esd_gesture_iram(void)
 
 	/* Wait for fw running code finished. */
 	if (ilits->info_from_hex || (ilits->chip->core_ver >= CORE_VER_1410))
-		msleep(50);
+		usleep_range(50000, 55000);
 
 	if (ilits->cascade_info_block.nNum != 0) {
 		ili_set_bypass_mode(ON);
@@ -866,7 +866,7 @@ int ili_touch_esd_gesture_iram(void)
 					ILI_INFO("ret = 0x%X, slave answer = 0x%X\n", slave_answer, ges_run);
 			}
 
-			mdelay(2);
+			usleep_range(2000, 2200);
 		} while (slave_answer != ges_run && --retry > 0);
 	}
 
@@ -881,7 +881,7 @@ int ili_touch_esd_gesture_iram(void)
 		if (answer != ges_run)
 			ILI_INFO("ret = 0x%X, answer = 0x%X\n", answer, ges_run);
 
-		mdelay(2);
+		usleep_range(2000, 2200);
 	} while (answer != ges_run && --retry > 0);
 
 	if (retry <= 0) {
@@ -1020,6 +1020,11 @@ void ili_demo_debug_info_mode(u8 *buf, size_t len)
 static void ilitek_tddi_touch_send_debug_data(u8 *buf, int len)
 {
 	int index;
+
+	/* Optimization: Check if debug is enabled before taking the lock */
+	if (!ilits->dnp && !ilits->dlnp)
+		return;
+
 	mutex_lock(&ilits->debug_mutex);
 
 	if (!ilits->dnp && !ilits->dlnp)
