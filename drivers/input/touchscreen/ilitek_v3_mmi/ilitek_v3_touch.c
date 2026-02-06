@@ -1272,8 +1272,9 @@ void ili_report_ap_mode(u8 *buf, int len)
 			touch_info[ilits->finger].y = yop;
 		} else {
 			if (ilits->rib.nReportResolutionMode == POSITION_LOW_RESOLUTION) {
-				touch_info[ilits->finger].x = xop * ilits->panel_wid / TPD_WIDTH;
-				touch_info[ilits->finger].y = yop * ilits->panel_hei / TPD_HEIGHT;
+				/* Replace division by 2048 (2^11) with right shift by 11 */
+				touch_info[ilits->finger].x = (xop * ilits->panel_wid) >> 11;
+				touch_info[ilits->finger].y = (yop * ilits->panel_hei) >> 11;
 			} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
 				touch_info[ilits->finger].x = xop * ilits->panel_wid / ilits->max_x;
 				touch_info[ilits->finger].y = yop * ilits->panel_hei / ilits->max_y;
@@ -1496,8 +1497,9 @@ void ili_pen_demo_mode_report_point(u8 *buf, int len)
 				touch_info[PEN_INDEX].y = yop;
 			} else {
 				if (ilits->rib.nReportResolutionMode == POSITION_LOW_RESOLUTION) {
-					touch_info[PEN_INDEX].x = xop * ilits->panel_wid / TPD_WIDTH;
-					touch_info[PEN_INDEX].y = yop * ilits->panel_hei / TPD_HEIGHT;
+					/* Replace division by 2048 (2^11) with right shift by 11 */
+					touch_info[PEN_INDEX].x = (xop * ilits->panel_wid) >> 11;
+					touch_info[PEN_INDEX].y = (yop * ilits->panel_hei) >> 11;
 				} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
 					touch_info[PEN_INDEX].x = xop * ilits->panel_wid / ilits->max_x;
 					touch_info[PEN_INDEX].y = yop * ilits->panel_hei / ilits->max_y;
@@ -1515,8 +1517,8 @@ void ili_pen_demo_mode_report_point(u8 *buf, int len)
 				touch_info[ilits->finger].y = yop;
 			} else {
 				if (ilits->rib.nReportResolutionMode == POSITION_LOW_RESOLUTION) {
-					touch_info[ilits->finger].x = xop * ilits->panel_wid / TPD_WIDTH;
-					touch_info[ilits->finger].y = yop * ilits->panel_hei / TPD_HEIGHT;
+					touch_info[ilits->finger].x = (xop * ilits->panel_wid) >> 11;
+					touch_info[ilits->finger].y = (yop * ilits->panel_hei) >> 11;
 				} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
 					touch_info[ilits->finger].x = xop * ilits->panel_wid / ilits->max_x;
 					touch_info[ilits->finger].y = yop * ilits->panel_hei / ilits->max_y;
@@ -1743,8 +1745,9 @@ void ili_pen_debug_mode_report_point(u8 *buf, int len, u8 offset)
 				touch_info[PEN_INDEX].y = yop;
 			} else {
 				if (ilits->rib.nReportResolutionMode == POSITION_LOW_RESOLUTION) {
-					touch_info[PEN_INDEX].x = xop * ilits->panel_wid / TPD_WIDTH;
-					touch_info[PEN_INDEX].y = yop * ilits->panel_hei / TPD_HEIGHT;
+					/* Replace division by 2048 (2^11) with right shift by 11 */
+					touch_info[PEN_INDEX].x = (xop * ilits->panel_wid) >> 11;
+					touch_info[PEN_INDEX].y = (yop * ilits->panel_hei) >> 11;
 				} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
 					touch_info[PEN_INDEX].x = xop * ilits->panel_wid / ilits->max_x;
 					touch_info[PEN_INDEX].y = yop * ilits->panel_hei / ilits->max_y;
@@ -1763,8 +1766,8 @@ void ili_pen_debug_mode_report_point(u8 *buf, int len, u8 offset)
 				touch_info[ilits->finger].y = yop;
 			} else {
 				if (ilits->rib.nReportResolutionMode == POSITION_LOW_RESOLUTION) {
-					touch_info[ilits->finger].x = xop * ilits->panel_wid / TPD_WIDTH;
-					touch_info[ilits->finger].y = yop * ilits->panel_hei / TPD_HEIGHT;
+					touch_info[ilits->finger].x = (xop * ilits->panel_wid) >> 11;
+					touch_info[ilits->finger].y = (yop * ilits->panel_hei) >> 11;
 				} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
 					touch_info[ilits->finger].x = xop * ilits->panel_wid / ilits->max_x;
 					touch_info[ilits->finger].y = yop * ilits->panel_hei / ilits->max_y;
@@ -1900,8 +1903,8 @@ void ili_debug_mode_report_point(u8 *buf, int len)
 			touch_info[ilits->finger].y = yop;
 		} else {
 			if (ilits->rib.nReportResolutionMode == POSITION_LOW_RESOLUTION) {
-				touch_info[ilits->finger].x = xop * ilits->panel_wid / TPD_WIDTH;
-				touch_info[ilits->finger].y = yop * ilits->panel_hei / TPD_HEIGHT;
+				touch_info[ilits->finger].x = (xop * ilits->panel_wid) >> 11;
+				touch_info[ilits->finger].y = (yop * ilits->panel_hei) >> 11;
 			} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
 				touch_info[ilits->finger].x = xop * ilits->panel_wid / ilits->max_x;
 				touch_info[ilits->finger].y = yop * ilits->panel_hei / ilits->max_y;
@@ -2244,18 +2247,19 @@ void ili_report_gesture_mode(u8 *buf, int len)
 
 	if (!transfer) {
 		if (ilits->rib.nReportResolutionMode == POSITION_LOW_RESOLUTION) {
-			gc->pos_start.x	= gc->pos_start.x * ilits->panel_wid / TPD_WIDTH;
-			gc->pos_start.y = gc->pos_start.y * ilits->panel_hei / TPD_HEIGHT;
-			gc->pos_end.x   = gc->pos_end.x * ilits->panel_wid / TPD_WIDTH;
-			gc->pos_end.y   = gc->pos_end.y * ilits->panel_hei / TPD_HEIGHT;
-			gc->pos_1st.x   = gc->pos_1st.x * ilits->panel_wid / TPD_WIDTH;
-			gc->pos_1st.y   = gc->pos_1st.y * ilits->panel_hei / TPD_HEIGHT;
-			gc->pos_2nd.x   = gc->pos_2nd.x * ilits->panel_wid / TPD_WIDTH;
-			gc->pos_2nd.y   = gc->pos_2nd.y * ilits->panel_hei / TPD_HEIGHT;
-			gc->pos_3rd.x   = gc->pos_3rd.x * ilits->panel_wid / TPD_WIDTH;
-			gc->pos_3rd.y   = gc->pos_3rd.y * ilits->panel_hei / TPD_HEIGHT;
-			gc->pos_4th.x   = gc->pos_4th.x * ilits->panel_wid / TPD_WIDTH;
-			gc->pos_4th.y   = gc->pos_4th.y * ilits->panel_hei / TPD_HEIGHT;
+			/* Replace division by 2048 (2^11) with right shift by 11 for gesture coordinates */
+			gc->pos_start.x	= (gc->pos_start.x * ilits->panel_wid) >> 11;
+			gc->pos_start.y = (gc->pos_start.y * ilits->panel_hei) >> 11;
+			gc->pos_end.x   = (gc->pos_end.x * ilits->panel_wid) >> 11;
+			gc->pos_end.y   = (gc->pos_end.y * ilits->panel_hei) >> 11;
+			gc->pos_1st.x   = (gc->pos_1st.x * ilits->panel_wid) >> 11;
+			gc->pos_1st.y   = (gc->pos_1st.y * ilits->panel_hei) >> 11;
+			gc->pos_2nd.x   = (gc->pos_2nd.x * ilits->panel_wid) >> 11;
+			gc->pos_2nd.y   = (gc->pos_2nd.y * ilits->panel_hei) >> 11;
+			gc->pos_3rd.x   = (gc->pos_3rd.x * ilits->panel_wid) >> 11;
+			gc->pos_3rd.y   = (gc->pos_3rd.y * ilits->panel_hei) >> 11;
+			gc->pos_4th.x   = (gc->pos_4th.x * ilits->panel_wid) >> 11;
+			gc->pos_4th.y   = (gc->pos_4th.y * ilits->panel_hei) >> 11;
 		} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
 			gc->pos_start.x	= gc->pos_start.x * ilits->panel_wid / ilits->max_x;
 			gc->pos_start.y = gc->pos_start.y * ilits->panel_hei / ilits->max_y;
