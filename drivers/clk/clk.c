@@ -1360,6 +1360,14 @@ static void clk_unprepare_disable_dev_subtree(struct clk_core *core,
 	if (core->dev != dev || !core->need_sync)
 		return;
 
+	/*
+	 * Check if a consumer driver has already disabled this clock.
+	 * If the enable/prepare counts are zero, the clock is already off,
+	 * so we don't need to (and shouldn't) disable it again.
+	 */
+	if (core->enable_count == 0 && core->prepare_count == 0)
+		return;
+
 	clk_core_disable_unprepare(core);
 }
 
