@@ -26,10 +26,15 @@
 bool debug_en = DEBUG_OUTPUT;
 EXPORT_SYMBOL(debug_en);
 
+#if ENABLE_WQ_ESD
 static struct workqueue_struct *esd_wq;
-static struct workqueue_struct *bat_wq;
 static struct delayed_work esd_work;
+#endif
+
+#if ENABLE_WQ_BAT
+static struct workqueue_struct *bat_wq;
 static struct delayed_work bat_work;
+#endif
 
 #if CHARGER_NOTIFIER_CALLBACK
 #if KERNEL_VERSION(4, 1, 0) <= LINUX_VERSION_CODE
@@ -493,6 +498,8 @@ int ili_wq_esd_i2c_check(void)
 	return 0;
 }
 
+
+#if ENABLE_WQ_ESD
 static void ilitek_tddi_wq_esd_check(struct work_struct *work)
 {
 	if (mutex_is_locked(&ilits->touch_mutex)) {
@@ -508,7 +515,9 @@ static void ilitek_tddi_wq_esd_check(struct work_struct *work)
 	complete_all(&ilits->esd_done);
 	ili_wq_ctrl(WQ_ESD, ENABLE);
 }
+#endif
 
+#if ENABLE_WQ_BAT
 static int read_power_status(u8 *buf)
 {
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 14, 0)
@@ -566,11 +575,13 @@ static void ilitek_tddi_wq_bat_check(struct work_struct *work)
 	}
 	ili_wq_ctrl(WQ_BAT, ENABLE);
 }
+#endif
 
 void ili_wq_ctrl(int type, int ctrl)
 {
 	switch (type) {
 	case WQ_ESD:
+#if ENABLE_WQ_ESD
 		if (ilits->esd_func_ctrl || ilits->wq_ctrl) {
 			if (!esd_wq) {
 				ILI_ERR("wq esd is null\n");
@@ -587,8 +598,10 @@ void ili_wq_ctrl(int type, int ctrl)
 				ILI_DBG("cancel esd wq\n");
 			}
 		}
+#endif
 		break;
 	case WQ_BAT:
+#if ENABLE_WQ_BAT
 		if (ENABLE_WQ_BAT || ilits->wq_ctrl) {
 			if (!bat_wq) {
 				ILI_ERR("WQ BAT is null\n");
@@ -605,6 +618,7 @@ void ili_wq_ctrl(int type, int ctrl)
 				ILI_DBG("cancel bat wq\n");
 			}
 		}
+#endif
 		break;
 	default:
 		ILI_ERR("Unknown WQ type, %d\n", type);
@@ -614,14 +628,26 @@ void ili_wq_ctrl(int type, int ctrl)
 
 static void ilitek_tddi_wq_init(void)
 {
+#if ENABLE_WQ_ESD
 	esd_wq = alloc_workqueue("esd_check", WQ_MEM_RECLAIM, 0);
+#endif
+#if ENABLE_WQ_BAT
 	bat_wq = alloc_workqueue("bat_check", WQ_MEM_RECLAIM, 0);
+#endif
 
+#if ENABLE_WQ_ESD
 	WARN_ON(!esd_wq);
+#endif
+#if ENABLE_WQ_BAT
 	WARN_ON(!bat_wq);
+#endif
 
+#if ENABLE_WQ_ESD
 	INIT_DELAYED_WORK(&esd_work, ilitek_tddi_wq_esd_check);
+#endif
+#if ENABLE_WQ_BAT
 	INIT_DELAYED_WORK(&bat_work, ilitek_tddi_wq_bat_check);
+#endif
 
 #if RESUME_BY_DDI
 	resume_by_ddi_wq = create_singlethread_workqueue("resume_by_ddi_wq");
@@ -1701,17 +1727,20 @@ void ili_dev_remove(bool flag)
 
 	gpio_free(ilits->tp_int);
 	gpio_free(ilits->tp_rst);
-
+#if ENABLE_WQ_ESD
 	if (esd_wq != NULL) {
 		cancel_delayed_work_sync(&esd_work);
 		flush_workqueue(esd_wq);
 		destroy_workqueue(esd_wq);
 	}
+#endif
+#if ENABLE_WQ_BAT
 	if (bat_wq != NULL) {
 		cancel_delayed_work_sync(&bat_work);
 		flush_workqueue(bat_wq);
 		destroy_workqueue(bat_wq);
 	}
+#endif
 
 	if (ilits->ws)
 		PM_WAKEUP_UNREGISTER(ilits->ws);
