@@ -951,10 +951,10 @@ static int ilitek_plat_probe(void)
 	ILI_INFO("platform probe\n");
 
 #if defined(CONFIG_INPUT_TOUCHSCREEN_MMI)
-        if (ilits->dev->of_node && !mmi_device_is_available(ilits->dev->of_node)) {
-            ILI_ERR("%s : mmi: device not supported\n", __func__);
-            return -ENODEV;
-        }
+	if (ilits->dev->of_node && !mmi_device_is_available(ilits->dev->of_node)) {
+		ILI_ERR("%s : mmi: device not supported\n", __func__);
+		return -ENODEV;
+	}
 #endif
 #if REGULATOR_POWER
 	ilitek_plat_regulator_power_init();
@@ -970,17 +970,30 @@ static int ilitek_plat_probe(void)
 #endif
 #endif
 
-	if (ilitek_plat_gpio_register() < 0)
+	if (ilitek_plat_gpio_register() < 0) {
 		ILI_ERR("Register gpio failed\n");
-
-	ili_irq_register(ilits->irq_tirgger_type);
-
-	if (ili_tddi_init() < 0) {
-		ILI_ERR("ILITEK Driver probe failed\n");
-		ili_irq_unregister();
 		ili_dev_remove(DISABLE);
 		return -ENODEV;
 	}
+
+	gpio_direction_output(ilits->tp_rst, 1);
+
+	ilits->irq_tirgger_type = irq_get_trigger_type(gpio_to_irq(ilits->tp_int));
+	if (ilits->irq_tirgger_type == IRQF_TRIGGER_NONE)
+		ilits->irq_tirgger_type = IRQF_TRIGGER_FALLING;
+
+	if (ili_tddi_init() < 0) {
+		ILI_ERR("ILITEK Driver probe failed\n");
+		ili_dev_remove(DISABLE);
+		return -ENODEV;
+	}
+
+	if (ili_irq_register(ilits->irq_tirgger_type) < 0) {
+		ILI_ERR("Failed to register IRQ\n");
+		ili_dev_remove(DISABLE);
+		return -ENODEV;
+	}
+
 #if SPRD_SYSFS_SUSPEND_RESUME
 	ili_sysfs_add_device(ilits->dev);
 	if (sysfs_create_link(NULL, &ilits->dev->kobj, "touchscreen") < 0)
