@@ -536,7 +536,7 @@ static ssize_t ilitek_proc_get_delta_data_read(struct file *pFile, char __user *
 		goto out;
 	}
 
-	delta = kcalloc(P5_X_DEBUG_MODE_PACKET_LENGTH, sizeof(s32), GFP_KERNEL);
+	delta = kcalloc(row * col, sizeof(s32), GFP_KERNEL);
 	if (ERR_ALLOC_MEM(delta)) {
 		ILI_ERR("Failed to allocate delta mem\n");
 		goto out;
@@ -639,7 +639,7 @@ static ssize_t ilitek_proc_fw_get_raw_data_read(struct file *pFile, char __user 
 		goto out;
 	}
 
-	rawdata = kcalloc(P5_X_DEBUG_MODE_PACKET_LENGTH, sizeof(s32), GFP_KERNEL);
+	rawdata = kcalloc(row * col, sizeof(s32), GFP_KERNEL);
 	if (ERR_ALLOC_MEM(rawdata)) {
 		ILI_ERR("Failed to allocate rawdata mem\n");
 		goto out;
