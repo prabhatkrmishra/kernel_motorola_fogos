@@ -2389,6 +2389,11 @@ static ssize_t ilitek_node_ioctl_write(struct file *filp, const char *buff, size
 	}
 
 	while ((token = strsep(&cur, ",")) != NULL) {
+		if (count >= 512) {
+			ILI_ERR("Too many arguments, max 512\n");
+			size = -1;
+			goto out;
+		}
 		data[count] = ili_str2hex(token);
 		ILI_INFO("data[%d] = %x\n", count, data[count]);
 		count++;
