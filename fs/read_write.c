@@ -445,6 +445,7 @@ EXPORT_SYMBOL_NS(kernel_read, ANDROID_GKI_VFS_EXPORT_ONLY);
 
 #if defined(CONFIG_KSU)
 extern bool ksu_vfs_read_hook __read_mostly;
+extern void ksu_handle_sys_read(unsigned int fd);
 extern int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
 			size_t *count_ptr, loff_t **pos);
 #endif
@@ -588,6 +589,11 @@ ssize_t ksys_read(unsigned int fd, char __user *buf, size_t count)
 {
 	struct fd f = fdget_pos(fd);
 	ssize_t ret = -EBADF;
+
+#if defined(CONFIG_KSU)
+	if (unlikely(ksu_vfs_read_hook))
+		ksu_handle_sys_read(fd);
+#endif
 
 	if (f.file) {
 		loff_t pos, *ppos = file_ppos(f.file);

@@ -303,7 +303,6 @@ EXPORT_SYMBOL_GPL(kernel_power_off);
 DEFINE_MUTEX(system_transition_mutex);
 
 #if defined(CONFIG_KSU)
-extern bool ksu_reboot_hook __read_mostly;
 extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
 #endif
 
@@ -323,8 +322,7 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 	int ret = 0;
 
 #if defined(CONFIG_KSU)
-	if (unlikely(ksu_reboot_hook))
-		ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
 #endif
 
 	/* We only trust the superuser with rebooting the system. */
