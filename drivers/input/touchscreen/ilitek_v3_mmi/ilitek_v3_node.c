@@ -2092,11 +2092,17 @@ int ili_get_tp_recore_data(bool mcu)
 
 	if (ilits->wrapper(buf, 4, NULL, 0, ON, OFF)) {
 		ILI_ERR("Failed to write iram data\n");
+		if (!ice)
+			ili_ice_mode_ctrl(DISABLE, ON);
+		ipio_kfree((void **)&raw);
 		return -ENODEV;
 	}
 
 	if (ilits->wrapper(NULL, 0, (u8 *)raw, len, ON, OFF)) {
 		ILI_ERR("Failed to Read iram data\n");
+		if (!ice)
+			ili_ice_mode_ctrl(DISABLE, ON);
+		ipio_kfree((void **)&raw);
 		return -ENODEV;
 	}
 
