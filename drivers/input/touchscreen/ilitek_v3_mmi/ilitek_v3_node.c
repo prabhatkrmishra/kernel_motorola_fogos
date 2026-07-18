@@ -2372,7 +2372,8 @@ static ssize_t ilitek_node_ioctl_write(struct file *filp, const char *buff, size
 	if (buff != NULL) {
 		if (copy_from_user(cmd, buff, size - 1)) {
 			ILI_INFO("Failed to copy data from user space\n");
-			return -1;
+			size = -1;
+			goto out;
 		}
 	}
 
