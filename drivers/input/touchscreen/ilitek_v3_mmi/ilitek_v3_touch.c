@@ -1235,6 +1235,17 @@ void ili_report_ap_mode(u8 *buf, int len)
 	int i = 0;
 	u32 xop = 0, yop = 0;
 
+	/*
+	 * Validate buffer length against worst-case access pattern.
+	 * High-res mode reads buf[(5 * i) + 5 + P5_X_DEMO_MODE_PACKET_INFO_LEN]
+	 * where i = MAX_TOUCH_NUM - 1, requiring at least this many bytes.
+	 */
+	if (len < P5_X_DEMO_MODE_PACKET_INFO_LEN + (5 * MAX_TOUCH_NUM) + 1) {
+		ILI_ERR("Buffer too short: %d bytes, need at least %d\n",
+			len, P5_X_DEMO_MODE_PACKET_INFO_LEN + (5 * MAX_TOUCH_NUM) + 1);
+		return;
+	}
+
 	memset(touch_info, 0x0, sizeof(touch_info));
 
 	ilits->finger = 0;
