@@ -46,6 +46,15 @@ ifeq ($(CONFIG_BROKEN_GAS_INST),y)
 $(warning Detected assembler with broken .inst; disassembly will be unreliable)
 endif
 
+ifdef CONFIG_CC_IS_CLANG
+# SM6375 (Snapdragon 6s Gen 3): Cortex-A78 (big) + Cortex-A55 (LITTLE), ARMv8.2-A.
+# ISA extensions the chip implements.
+KBUILD_CFLAGS	+= -march=armv8.2-a+simd+fp16+dotprod+crypto+aes+sha2+crc
+KBUILD_CFLAGS	+= -mcpu=generic
+KBUILD_AFLAGS	+= -march=armv8.2-a+simd+fp16+dotprod+crypto+aes+sha2+crc
+KBUILD_AFLAGS	+= -mcpu=generic
+endif
+
 KBUILD_CFLAGS	+= -mgeneral-regs-only	\
 		   $(compat_vdso) $(cc_has_k_constraint)
 KBUILD_CFLAGS	+= -fno-asynchronous-unwind-tables
