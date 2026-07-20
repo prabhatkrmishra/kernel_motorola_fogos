@@ -799,7 +799,7 @@ static int ilitek_spi_probe(struct spi_device *spi)
 	ilits->gesture_mode = DATA_FORMAT_GESTURE_INFO;
 	ilits->gesture_demo_ctrl = DISABLE;
 	ilits->wtd_ctrl = OFF;
-	ilits->report = ENABLE;
+	atomic_set(&ilits->report, ENABLE);
 	ilits->dnp = DISABLE;
 	ilits->dlnp = DISABLE;
 	ilits->irq_tirgger_type = IRQF_TRIGGER_FALLING;

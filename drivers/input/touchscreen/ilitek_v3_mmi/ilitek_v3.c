@@ -209,7 +209,7 @@ void ili_resume_by_ddi(void)
 
 	ILI_INFO("TP resume start called by ddi\n");
 	ilits->tp_suspend = false;
-	ilits->report = ENABLE;
+	atomic_set(&ilits->report, ENABLE);
 	/*
 	 * To match the timing of sleep out, the first of mipi cmd must be sent within 10ms
 	 * after TP reset. We then create a wq doing host download before resume.
@@ -777,7 +777,7 @@ int ili_sleep_handler(int mode)
 			ili_ic_func_ctrl_reset();
 		}
 		ilits->power_status = true;
-		ilits->report = ENABLE;
+		atomic_set(&ilits->report, ENABLE);
 
 		if (ilits->prox_face_mode == PROXIMITY_SUSPEND_RESUME) {
 		ilits->proxmity_face = false;
@@ -1224,7 +1224,7 @@ int ili_report_handler(void)
 	int tmp = debug_en;
 
 	/* Just in case these stats couldn't be blocked in top half context */
-	if (!ilits->boot || !ilits->report || atomic_read(&ilits->tp_reset) || atomic_read(&ilits->ignore_report) ||
+	if (!ilits->boot || !atomic_read(&ilits->report) || atomic_read(&ilits->tp_reset) || atomic_read(&ilits->ignore_report) ||
 		atomic_read(&ilits->fw_stat) || atomic_read(&ilits->tp_sw_mode) ||
 		atomic_read(&ilits->mp_stat) || atomic_read(&ilits->tp_sleep)) {
 		ILI_INFO("ignore report request\n");

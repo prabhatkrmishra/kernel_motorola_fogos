@@ -3101,10 +3101,10 @@ static long ilitek_node_ioctl(struct file *filp, unsigned int cmd, unsigned long
 
 		ILI_DBG("ioctl: report switch = %d\n", szBuf[0]);
 		if (szBuf[0]) {
-			ilits->report = ENABLE;
+			atomic_set(&ilits->report, ENABLE);
 			ILI_DBG("report is enabled\n");
 		} else {
-			ilits->report = DISABLE;
+			atomic_set(&ilits->report, DISABLE);
 			ILI_DBG("report is disabled\n");
 		}
 		break;

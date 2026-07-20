@@ -295,7 +295,7 @@ static irqreturn_t ilitek_plat_isr_top_half(int irq, void *dev_id)
 	}
 
 	ILI_DBG("report: %d, rst: %d, fw: %d, switch: %d, mp: %d, sleep: %d, esd: %d, igr:%d\n",
-			ilits->report,
+			atomic_read(&ilits->report),
 			atomic_read(&ilits->tp_reset),
 			atomic_read(&ilits->fw_stat),
 			atomic_read(&ilits->tp_sw_mode),
@@ -304,7 +304,7 @@ static irqreturn_t ilitek_plat_isr_top_half(int irq, void *dev_id)
 			atomic_read(&ilits->esd_stat),
 			atomic_read(&ilits->ignore_report));
 
-	if (!ilits->report || atomic_read(&ilits->tp_reset) ||  atomic_read(&ilits->ignore_report) ||
+	if (!atomic_read(&ilits->report) || atomic_read(&ilits->tp_reset) ||  atomic_read(&ilits->ignore_report) ||
 		atomic_read(&ilits->fw_stat) || atomic_read(&ilits->tp_sw_mode) ||
 		atomic_read(&ilits->mp_stat) || atomic_read(&ilits->tp_sleep) ||
 		atomic_read(&ilits->esd_stat)) {

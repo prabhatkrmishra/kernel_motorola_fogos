@@ -410,7 +410,7 @@ static int ilitek_i2c_probe(struct i2c_client *i2c, const struct i2c_device_id *
 	ilits->gesture_mode = DATA_FORMAT_GESTURE_INFO;
 	ilits->gesture_demo_ctrl = DISABLE;
 	ilits->wtd_ctrl = OFF;
-	ilits->report = ENABLE;
+	atomic_set(&ilits->report, ENABLE);
 	ilits->dnp = DISABLE;
 	ilits->dlnp = DISABLE;
 	ilits->irq_tirgger_type = IRQF_TRIGGER_RISING;
