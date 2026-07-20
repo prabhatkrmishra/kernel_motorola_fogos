@@ -1234,6 +1234,7 @@ void ili_report_ap_mode(u8 *buf, int len)
 {
 	int i = 0;
 	u32 xop = 0, yop = 0;
+	static u8 touch_frame_count[MAX_TOUCH_NUM];
 
 	/*
 	 * Validate buffer length against worst-case access pattern.
@@ -1340,6 +1341,20 @@ void ili_report_ap_mode(u8 *buf, int len)
 		ilits->finger++;
 		if (MT_B_TYPE)
 			ilits->curt_touch[i] = 1;
+	}
+
+	/* Single-frame debounce: require 2 consecutive frames to confirm a touch */
+	if (MT_B_TYPE) {
+		for (i = 0; i < MAX_TOUCH_NUM; i++) {
+			if (ilits->curt_touch[i] == 1) {
+				if (touch_frame_count[i] < 2)
+					touch_frame_count[i]++;
+				if (touch_frame_count[i] < 2)
+					ilits->curt_touch[i] = 0;
+			} else {
+				touch_frame_count[i] = 0;
+			}
+		}
 	}
 
 #ifdef ROI
