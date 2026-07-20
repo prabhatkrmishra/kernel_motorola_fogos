@@ -1306,8 +1306,8 @@ void ili_report_ap_mode(u8 *buf, int len)
 				touch_info[ilits->finger].x = (xop * ilits->panel_wid) >> 11;
 				touch_info[ilits->finger].y = (yop * ilits->panel_hei) >> 11;
 			} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
-				touch_info[ilits->finger].x = xop * ilits->panel_wid / ilits->max_x;
-				touch_info[ilits->finger].y = yop * ilits->panel_hei / ilits->max_y;
+				touch_info[ilits->finger].x = ilits->max_x ? xop * ilits->panel_wid / ilits->max_x : 0;
+				touch_info[ilits->finger].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 			}
 		}
 
@@ -1582,8 +1582,8 @@ void ili_pen_demo_mode_report_point(u8 *buf, int len)
 					touch_info[PEN_INDEX].x = (xop * ilits->panel_wid) >> 11;
 					touch_info[PEN_INDEX].y = (yop * ilits->panel_hei) >> 11;
 				} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
-					touch_info[PEN_INDEX].x = xop * ilits->panel_wid / ilits->max_x;
-					touch_info[PEN_INDEX].y = yop * ilits->panel_hei / ilits->max_y;
+					touch_info[PEN_INDEX].x = ilits->max_x ? xop * ilits->panel_wid / ilits->max_x : 0;
+					touch_info[PEN_INDEX].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 				}
 			}
 			/* Bounds check for pen coordinates */
@@ -1609,8 +1609,8 @@ void ili_pen_demo_mode_report_point(u8 *buf, int len)
 					touch_info[ilits->finger].x = (xop * ilits->panel_wid) >> 11;
 					touch_info[ilits->finger].y = (yop * ilits->panel_hei) >> 11;
 				} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
-					touch_info[ilits->finger].x = xop * ilits->panel_wid / ilits->max_x;
-					touch_info[ilits->finger].y = yop * ilits->panel_hei / ilits->max_y;
+					touch_info[ilits->finger].x = ilits->max_x ? xop * ilits->panel_wid / ilits->max_x : 0;
+					touch_info[ilits->finger].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 				}
 			}
 			/* Bounds check for finger coordinates */
@@ -1850,8 +1850,8 @@ void ili_pen_debug_mode_report_point(u8 *buf, int len, u8 offset)
 					touch_info[PEN_INDEX].x = (xop * ilits->panel_wid) >> 11;
 					touch_info[PEN_INDEX].y = (yop * ilits->panel_hei) >> 11;
 				} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
-					touch_info[PEN_INDEX].x = xop * ilits->panel_wid / ilits->max_x;
-					touch_info[PEN_INDEX].y = yop * ilits->panel_hei / ilits->max_y;
+					touch_info[PEN_INDEX].x = ilits->max_x ? xop * ilits->panel_wid / ilits->max_x : 0;
+					touch_info[PEN_INDEX].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 				}
 			}
 
@@ -1870,8 +1870,8 @@ void ili_pen_debug_mode_report_point(u8 *buf, int len, u8 offset)
 					touch_info[ilits->finger].x = (xop * ilits->panel_wid) >> 11;
 					touch_info[ilits->finger].y = (yop * ilits->panel_hei) >> 11;
 				} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
-					touch_info[ilits->finger].x = xop * ilits->panel_wid / ilits->max_x;
-					touch_info[ilits->finger].y = yop * ilits->panel_hei / ilits->max_y;
+					touch_info[ilits->finger].x = ilits->max_x ? xop * ilits->panel_wid / ilits->max_x : 0;
+					touch_info[ilits->finger].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 				}
 			}
 			touch_info[ilits->finger].id = i;
@@ -2008,8 +2008,8 @@ void ili_debug_mode_report_point(u8 *buf, int len)
 				touch_info[ilits->finger].x = (xop * ilits->panel_wid) >> 11;
 				touch_info[ilits->finger].y = (yop * ilits->panel_hei) >> 11;
 			} else if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
-				touch_info[ilits->finger].x = xop * ilits->panel_wid / ilits->max_x;
-				touch_info[ilits->finger].y = yop * ilits->panel_hei / ilits->max_y;
+				touch_info[ilits->finger].x = ilits->max_x ? xop * ilits->panel_wid / ilits->max_x : 0;
+				touch_info[ilits->finger].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 			}
 		}
 
