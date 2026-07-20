@@ -1246,6 +1246,23 @@ void ili_report_ap_mode(u8 *buf, int len)
 		return;
 	}
 
+	/* Reject zero-buffer I2C data (all 0x00 indicates failed read) */
+	{
+		bool all_zero = true;
+		int j, check_len = (len < 16) ? len : 16;
+
+		for (j = 0; j < check_len; j++) {
+			if (buf[j] != 0x00) {
+				all_zero = false;
+				break;
+			}
+		}
+		if (all_zero) {
+			ILI_DBG("Zero-buffer detected, ignoring\n");
+			return;
+		}
+	}
+
 	memset(touch_info, 0x0, sizeof(touch_info));
 
 	ilits->finger = 0;
