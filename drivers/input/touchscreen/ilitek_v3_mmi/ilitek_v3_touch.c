@@ -2410,6 +2410,9 @@ void ili_report_i2cuart_mode(u8 *buf, int len)
 		one_data_bytes = 2;
 	} else if (type == 4 || type == 5) {
 		one_data_bytes = 4;
+	} else {
+		ILI_DBG("I2CUART: unknown type %d, ignoring\n", type);
+		goto out;
 	}
 
 	need_read_len =  need_read_len * one_data_bytes + 1;
@@ -2421,6 +2424,11 @@ void ili_report_i2cuart_mode(u8 *buf, int len)
 	}
 
 	uart_len = need_read_len - actual_len;
+
+	if (uart_len <= 0 || uart_len > TR_BUF_SIZE) {
+		ILI_DBG("I2CUART: invalid uart_len %d\n", uart_len);
+		goto out;
+	}
 	ILI_DBG("uart len = %d\n", uart_len);
 
 	uart_buf = kcalloc(uart_len, sizeof(u8), GFP_KERNEL);
