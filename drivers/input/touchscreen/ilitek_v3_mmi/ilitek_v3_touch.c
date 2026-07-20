@@ -1869,6 +1869,14 @@ void ili_pen_debug_mode_report_point(u8 *buf, int len, u8 offset)
 					touch_info[PEN_INDEX].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 				}
 			}
+			/* Bounds check for pen coordinates */
+			if (!ilits->trans_xy &&
+			    (touch_info[PEN_INDEX].x >= ilits->panel_wid ||
+			     touch_info[PEN_INDEX].y >= ilits->panel_hei)) {
+				ILI_DBG("Pen debug: pen out of bounds: (%d, %d)\n",
+					touch_info[PEN_INDEX].x, touch_info[PEN_INDEX].y);
+				continue;
+			}
 
 			touch_info[PEN_INDEX].id = i;
 			touch_info[PEN_INDEX].pressure = ( buf[PenStartIdx + TOUCH_PRESS_OFFSET] << 8 ) + buf[PenStartIdx + TOUCH_PRESS_OFFSET + 1];
@@ -1888,6 +1896,16 @@ void ili_pen_debug_mode_report_point(u8 *buf, int len, u8 offset)
 					touch_info[ilits->finger].x = ilits->max_x ? xop * ilits->panel_wid / ilits->max_x : 0;
 					touch_info[ilits->finger].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 				}
+			}
+			/* Bounds check for finger coordinates */
+			if (!ilits->trans_xy &&
+			    (touch_info[ilits->finger].x >= ilits->panel_wid ||
+			     touch_info[ilits->finger].y >= ilits->panel_hei)) {
+				ILI_DBG("Pen debug finger %d out of bounds: (%d, %d)\n",
+					i, touch_info[ilits->finger].x, touch_info[ilits->finger].y);
+				if (MT_B_TYPE)
+					ilits->curt_touch[i] = 0;
+				continue;
 			}
 			touch_info[ilits->finger].id = i;
 
