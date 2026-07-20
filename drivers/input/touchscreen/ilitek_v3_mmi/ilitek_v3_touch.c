@@ -2028,6 +2028,17 @@ void ili_debug_mode_report_point(u8 *buf, int len)
 			}
 		}
 
+		/* Bounds check: discard out-of-panel coordinates */
+		if (!ilits->trans_xy &&
+		    (touch_info[ilits->finger].x >= ilits->panel_wid ||
+		     touch_info[ilits->finger].y >= ilits->panel_hei)) {
+			ILI_DBG("Debug finger %d out of bounds: (%d, %d)\n",
+				i, touch_info[ilits->finger].x, touch_info[ilits->finger].y);
+			if (MT_B_TYPE)
+				ilits->curt_touch[i] = 0;
+			continue;
+		}
+
 		touch_info[ilits->finger].id = i;
 
 		if (MT_PRESSURE) {
