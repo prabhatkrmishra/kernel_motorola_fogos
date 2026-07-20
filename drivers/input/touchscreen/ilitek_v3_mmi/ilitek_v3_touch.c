@@ -1264,6 +1264,7 @@ void ili_report_ap_mode(u8 *buf, int len)
 	}
 
 	memset(touch_info, 0x0, sizeof(touch_info));
+	memset(ilits->curt_touch, 0, sizeof(ilits->curt_touch));
 
 	ilits->finger = 0;
 
@@ -1455,6 +1456,7 @@ void ili_pen_demo_mode_report_point(u8 *buf, int len)
 	u32 xop = 0, yop = 0, PenStartIdx = 0;
 
 	memset(touch_info, 0x0, sizeof(touch_info));
+	memset(ilits->curt_touch, 0, sizeof(ilits->curt_touch));
 
 	ilits->finger = 0;
 	ilits->pen = 0;
@@ -1695,6 +1697,7 @@ void ili_pen_debug_mode_report_point(u8 *buf, int len, u8 offset)
 	static u8 p[MAX_TOUCH_NUM];
 
 	memset(touch_info, 0x0, sizeof(touch_info));
+	memset(ilits->curt_touch, 0, sizeof(ilits->curt_touch));
 
 	ilits->finger = 0;
 	ilits->pen = 0;
@@ -1934,6 +1937,7 @@ void ili_debug_mode_report_point(u8 *buf, int len)
 	static u8 p[MAX_TOUCH_NUM];
 
 	memset(touch_info, 0x0, sizeof(touch_info));
+	memset(ilits->curt_touch, 0, sizeof(ilits->curt_touch));
 
 	ilits->finger = 0;
 
