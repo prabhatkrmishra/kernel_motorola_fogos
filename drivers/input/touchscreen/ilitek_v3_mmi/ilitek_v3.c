@@ -760,7 +760,6 @@ int ili_sleep_handler(int mode)
 #if !RESUME_BY_DDI
 		ILI_INFO("TP resume start\n");
 		ilits->tp_suspend = false;
-		ilits->report = ENABLE;
 
 		/* Set tp as demo mode and reload code if it's iram. */
 		ilits->actual_tp_mode = P5_X_FW_AP_MODE;
@@ -778,6 +777,7 @@ int ili_sleep_handler(int mode)
 			ili_ic_func_ctrl_reset();
 		}
 		ilits->power_status = true;
+		ilits->report = ENABLE;
 
 		if (ilits->prox_face_mode == PROXIMITY_SUSPEND_RESUME) {
 		ilits->proxmity_face = false;
