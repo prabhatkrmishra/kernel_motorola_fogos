@@ -1347,62 +1347,64 @@ void ili_report_ap_mode(u8 *buf, int len)
 #endif
 	ILI_DBG("figner number = %d, LastTouch = %d\n", ilits->finger, ilits->last_touch);
 
-	if (ilits->finger) {
-		if (MT_B_TYPE) {
-			u32 touchs = 0, released = 0;
+	if (MT_B_TYPE) {
+		u32 touchs = 0, released = 0;
+		bool va_reported = false;
 
-			for (i = 0; i < ilits->finger; i++) {
-				int slot = touch_info[i].id;
-				if (slot < MAX_TOUCH_NUM) {
-					touchs |= BIT(slot);
-					ili_touch_press(touch_info[i].x, touch_info[i].y, touch_info[i].pressure, slot);
-				}
+		for (i = 0; i < ilits->finger; i++) {
+			int slot = touch_info[i].id;
+			if (slot < MAX_TOUCH_NUM) {
+				touchs |= BIT(slot);
+				va_reported = true;
+				ili_touch_press(touch_info[i].x, touch_info[i].y, touch_info[i].pressure, slot);
 			}
-
-			released = ilits->touchs & ~touchs;
-			if (unlikely(released)) {
-				for (i = 0; i < MAX_TOUCH_NUM; i++) {
-					if (BIT(i) & released) {
-						ILI_DBG("[XOR]P%d UP!", i);
-						ili_touch_release(0, 0, i);
-					}
-				}
-			}
-
-			ilits->touchs = touchs;
-			input_report_key(ilits->input, BTN_TOUCH, 1);
-			input_report_key(ilits->input, BTN_TOOL_FINGER, 1);
-		} else {
-			for (i = 0; i < ilits->finger; i++)
-				ili_touch_press(touch_info[i].x, touch_info[i].y, touch_info[i].pressure, touch_info[i].id);
 		}
-		input_sync(ilits->input);
-		ilits->last_touch = ilits->finger;
-	} else {
-		if (ilits->last_touch) {
-			if (MT_B_TYPE) {
-				if (unlikely(ilits->touchs)) {
-					for (i = 0; i < MAX_TOUCH_NUM; i++) {
-						if (BIT(i) & ilits->touchs) {
-							ILI_DBG("[XOR]P%d UP! (All release)", i);
-							ili_touch_release(0, 0, i);
-						}
-					}
-				}
 
-				ilits->touchs = 0;
+		released = ilits->touchs & ~touchs;
+		if (unlikely(released)) {
+			for (i = 0; i < MAX_TOUCH_NUM; i++) {
+				if (BIT(i) & released) {
+					ILI_DBG("[XOR]P%d UP!", i);
+					va_reported = true;
+					ili_touch_release(0, 0, i);
+				}
+			}
+		}
+
+		ilits->touchs = touchs;
+
+		if (va_reported) {
+			if (touchs) {
+				input_report_key(ilits->input, BTN_TOUCH, 1);
+				input_report_key(ilits->input, BTN_TOOL_FINGER, 1);
+			} else {
 				input_report_key(ilits->input, BTN_TOUCH, 0);
 				input_report_key(ilits->input, BTN_TOOL_FINGER, 0);
-			} else {
-				ili_touch_release(0, 0, 0);
+#ifdef ILI_TOUCH_LAST_TIME
+				ilits->last_event_time = ktime_get_boottime();
+				ILI_DBG("last touch, save last_event_time\n");
+#endif
 			}
 			input_sync(ilits->input);
-			ilits->last_touch = 0;
+		}
+
+		ilits->last_touch = ilits->finger;
+	} else {
+		if (ilits->finger) {
+			for (i = 0; i < ilits->finger; i++)
+				ili_touch_press(touch_info[i].x, touch_info[i].y, touch_info[i].pressure, touch_info[i].id);
+			input_sync(ilits->input);
+			ilits->last_touch = ilits->finger;
+		} else {
+			if (ilits->last_touch) {
+				ili_touch_release(0, 0, 0);
 #ifdef ILI_TOUCH_LAST_TIME
-			//save last timestamp after last touch reported to avoid impacting multi and swipe touch
-			ilits->last_event_time = ktime_get_boottime();
-			ILI_DBG("last touch, save last_event_time\n");
+				ilits->last_event_time = ktime_get_boottime();
+				ILI_DBG("last touch, save last_event_time\n");
 #endif
+				input_sync(ilits->input);
+				ilits->last_touch = 0;
+			}
 		}
 	}
 	ilitek_tddi_touch_customer_data_parsing(buf);
