@@ -1235,6 +1235,8 @@ void ili_report_ap_mode(u8 *buf, int len)
 	int i = 0;
 	u32 xop = 0, yop = 0;
 
+	memset(ilits->curt_touch, 0, sizeof(ilits->curt_touch));
+
 	/*
 	 * Validate buffer length against worst-case access pattern.
 	 * High-res mode reads buf[(5 * i) + 5 + P5_X_DEMO_MODE_PACKET_INFO_LEN]
@@ -1264,7 +1266,6 @@ void ili_report_ap_mode(u8 *buf, int len)
 	}
 
 	memset(touch_info, 0x0, sizeof(touch_info));
-	memset(ilits->curt_touch, 0, sizeof(ilits->curt_touch));
 
 	ilits->finger = 0;
 
