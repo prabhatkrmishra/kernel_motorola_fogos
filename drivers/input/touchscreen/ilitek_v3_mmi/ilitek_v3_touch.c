@@ -1364,7 +1364,7 @@ void ili_report_ap_mode(u8 *buf, int len)
 
 	if (ilits->finger) {
 		if (MT_B_TYPE) {
-			u32 touchs = 0;
+			u32 touchs = 0, released = 0;
 
 			for (i = 0; i < ilits->finger; i++) {
 				int slot = touch_info[i].id;
@@ -1374,9 +1374,10 @@ void ili_report_ap_mode(u8 *buf, int len)
 				}
 			}
 
-			if (unlikely(ilits->touchs ^ touchs)) {
+			released = ilits->touchs & ~touchs;
+			if (unlikely(released)) {
 				for (i = 0; i < MAX_TOUCH_NUM; i++) {
-					if (BIT(i) & (ilits->touchs ^ touchs)) {
+					if (BIT(i) & released) {
 						ILI_DBG("[XOR]P%d UP!", i);
 						ili_touch_release(0, 0, i);
 					}
