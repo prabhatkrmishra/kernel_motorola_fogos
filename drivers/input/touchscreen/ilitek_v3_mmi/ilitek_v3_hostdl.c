@@ -497,7 +497,7 @@ static int ilitek_fw_calc_file_crc(u8 *pfw)
 		block_num++;
 		ex_addr = fbi[i].end;
 		data_crc = CalculateCRC32(fbi[i].start, fbi[i].len - 4, pfw);
-		file_crc = pfw[ex_addr - 3] << 24 | pfw[ex_addr - 2] << 16 | pfw[ex_addr - 1] << 8 | pfw[ex_addr];
+		file_crc = (u32)pfw[ex_addr - 3] << 24 | (u32)pfw[ex_addr - 2] << 16 | (u32)pfw[ex_addr - 1] << 8 | pfw[ex_addr];
 		ILI_DBG("data crc = %x, file crc = %x\n", data_crc, file_crc);
 		if (data_crc != file_crc) {
 			ILI_ERR("Content of fw file is broken. (%d, %x, %x)\n",

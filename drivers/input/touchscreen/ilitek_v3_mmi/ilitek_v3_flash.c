@@ -131,7 +131,7 @@ static int CalculateCRC32(u32 start_addr, u32 len, u8 *pfw)
 	int tmp_crc = 0xFFFFFFFF;
 
 	for (i = start_addr; i < start_addr + len; i++) {
-		tmp_crc ^= (pfw[i] << 24);
+		tmp_crc ^= ((u32)pfw[i] << 24);
 
 		for (j = 0; j < 8; j++) {
 			if ((tmp_crc & 0x80000000) != 0)
