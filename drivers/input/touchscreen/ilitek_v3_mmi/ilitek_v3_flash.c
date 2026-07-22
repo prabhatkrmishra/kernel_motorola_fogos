@@ -862,7 +862,10 @@ static int ilitek_fw_check_ddi_chunk(u8 *pfw)
 		ILI_ERR("Failed to read customer reserved block data from fw\n");
 		goto dma;
 	}
-	ipio_memcpy(&pfw[start], fw_flash_tmp + 6, DDI_RSV_BK_SIZE, MAX_HEX_FILE_SIZE - start);
+	if (start < MAX_HEX_FILE_SIZE) {
+		int copy_sz = min_t(int, DDI_RSV_BK_SIZE, MAX_HEX_FILE_SIZE - start);
+		ipio_memcpy(&pfw[start], fw_flash_tmp + 6, copy_sz, copy_sz);
+	}
 
 	/* Read mp data block */
 	start = DDI_RSV_BK_END_ADDR - DDI_RSV_BK_SIZE + 1;
@@ -875,7 +878,10 @@ static int ilitek_fw_check_ddi_chunk(u8 *pfw)
 		ILI_ERR("Failed to read mp data block from fw\n");
 		goto dma;
 	}
-	ipio_memcpy(&pfw[start], fw_flash_tmp + 6, DDI_RSV_BK_SIZE, MAX_HEX_FILE_SIZE - start);
+	if (start < MAX_HEX_FILE_SIZE) {
+		int copy_sz = min_t(int, DDI_RSV_BK_SIZE, MAX_HEX_FILE_SIZE - start);
+		ipio_memcpy(&pfw[start], fw_flash_tmp + 6, copy_sz, copy_sz);
+	}
 
 	goto out;
 
@@ -893,7 +899,10 @@ dma:
 		ret = UPDATE_FAIL;
 		goto out;
 	}
-	ipio_memcpy(&pfw[start], fw_flash_tmp + 6, DDI_RSV_BK_SIZE, MAX_HEX_FILE_SIZE - start);
+	if (start < MAX_HEX_FILE_SIZE) {
+		int copy_sz = min_t(int, DDI_RSV_BK_SIZE, MAX_HEX_FILE_SIZE - start);
+		ipio_memcpy(&pfw[start], fw_flash_tmp + 6, copy_sz, copy_sz);
+	}
 
 	/* Read mp data block */
 	start = DDI_RSV_BK_END_ADDR - DDI_RSV_BK_SIZE + 1;
@@ -904,7 +913,10 @@ dma:
 		ret = UPDATE_FAIL;
 		goto out;
 	}
-	ipio_memcpy(&pfw[start], fw_flash_tmp + 6, DDI_RSV_BK_SIZE, MAX_HEX_FILE_SIZE - start);
+	if (start < MAX_HEX_FILE_SIZE) {
+		int copy_sz = min_t(int, DDI_RSV_BK_SIZE, MAX_HEX_FILE_SIZE - start);
+		ipio_memcpy(&pfw[start], fw_flash_tmp + 6, copy_sz, copy_sz);
+	}
 
 	ili_ice_mode_ctrl(DISABLE, OFF);
 out:
