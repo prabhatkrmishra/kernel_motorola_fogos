@@ -279,7 +279,7 @@ static int ilitek_tddi_flash_poll_busy(int timer)
 		if (ili_ice_mode_write(FLASH2_ADDR, 0xFF, 1) < 0)
 			ILI_ERR("Write dummy failed\n");
 
-		mdelay(1);
+		usleep_range(1000, 2000);
 
 		if (ili_ice_mode_read(FLASH4_ADDR, &temp, sizeof(u8)) < 0)
 			ILI_ERR("Read flash busy error\n");
@@ -329,7 +329,7 @@ static int ilitek_tddi_flash_read_int_flag(void)
 		ILI_DBG("int flag = %x\n", data);
 		if (data)
 			break;
-		mdelay(2);
+		usleep_range(2000, 3000);
 	} while (--retry >= 0);
 
 	if (retry <= 0) {
@@ -485,7 +485,7 @@ int ili_fw_read_hw_crc(u32 start, u32 end, u32 *flash_crc)
 		ILI_DBG("busy = %x\n", busy);
 		if (((busy >> 1) & 0x01) == 0x01)
 			break;
-		mdelay(2);
+		usleep_range(2000, 3000);
 	} while (--retry >= 0);
 
 	if (ili_ice_mode_write(FLASH_BASED_ADDR, 0x1, 1) < 0)
@@ -800,7 +800,7 @@ void ilitek_tddi_flash_protect(bool enable, bool mcu)
 		}
 
 		ilitek_tddi_flash_write_enable();
-		mdelay(30);
+		msleep(30);
 
 		if (ili_ice_mode_write(FLASH_BASED_ADDR, 0x0, 1) < 0)/* CS Low */
 			ILI_ERR("Write cs low failed\n");
@@ -1105,7 +1105,7 @@ static int ilitek_tddi_fw_flash_program(u8 *pfw)
 				ILI_ERR("Write cs high failed\n");
 
 			if (ilits->flash_mid == 0xEF) {
-				mdelay(1);
+				usleep_range(1000, 2000);
 			} else {
 				if (ilitek_tddi_flash_poll_busy(TIMEOUT_PROGRAM) < 0) {
 					ipio_kfree((void **)&buf);
@@ -1168,7 +1168,7 @@ static int ilitek_tddi_fw_flash_erase(bool mcu)
 				ILI_ERR("Write cs high failed\n");
 
 			/* Waitint for flash setting ready */
-			mdelay(1);
+			usleep_range(1000, 2000);
 
 			if (addr == fbi[AP].start)
 				ret = ilitek_tddi_flash_poll_busy(TIMEOUT_PAGE);

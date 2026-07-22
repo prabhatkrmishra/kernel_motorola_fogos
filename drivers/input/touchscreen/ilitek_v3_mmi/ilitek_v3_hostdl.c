@@ -138,7 +138,7 @@ static int calc_hw_dma_crc(u32 start_addr, u32 block_size)
 
 	/* Polling BIT0 */
 	while (count > 0) {
-		mdelay(1);
+		usleep_range(1000, 2000);
 		if (ili_ice_mode_read(0x048006, &busy, sizeof(u8)) < 0)
 			ILI_ERR("Read busy error\n");
 		ILI_DBG("busy = %x\n", busy);
@@ -475,7 +475,7 @@ static int ilitek_tddi_fw_iram_upgrade(u8 *pfw, bool mcu)
 		ret = -EFW_ICE_MODE;
 	}
 
-	mdelay(20);
+	msleep(20);
 
 	return ret;
 }
@@ -1046,7 +1046,7 @@ int ili_fw_upgrade(int op)
 		} else {
 			ili_reset_ctrl(ilits->reset);
 		}
-		mdelay(50);
+		msleep(50);
 	}
 #else
 	do {
