@@ -2143,10 +2143,10 @@ static int allnode_peak_to_peak_cdc_data(int index)
 		}
 		for (i = 0; i < tItems[index].bch_mrk_frm_num; i++) {
 			frm_buf[i] = (s32 *)kzalloc(core_mp.frame_len * sizeof(s32), GFP_KERNEL);
-			if (ERR_ALLOC_MEM(frm_buf)) {
-				ILI_ERR("Failed to allocate frm_buf[%d] mem (%ld)\n", i, PTR_ERR(frm_buf));
+			if (ERR_ALLOC_MEM(frm_buf[i])) {
+				ILI_ERR("Failed to allocate frm_buf[%d] mem (%ld)\n", i, PTR_ERR(frm_buf[i]));
 				ret = -EMP_NOMEM;
-				goto out;
+				goto out_frm;
 			}
 		}
 	}
@@ -2238,6 +2238,10 @@ static int allnode_peak_to_peak_cdc_data(int index)
 		ili_dump_data(frm_buf[0], 32, (len / 2 - 1), core_mp.xch_len, "Mutual CDC combined[0]/frame1");
 	}
 
+out_frm:
+	while (--i >= 0)
+		ipio_kfree((void **)&frm_buf[i]);
+	ipio_kfree((void **)&frm_buf);
 out:
 	ipio_kfree((void **)&ori);
 	return ret;
