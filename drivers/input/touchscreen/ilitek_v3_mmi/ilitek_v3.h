@@ -1214,7 +1214,6 @@ struct ilitek_ts_data {
 	int finger;
 	u8 customertype_off;
 	u32 cdc_data_len;
-	u32 touchs;
 	u8 gesture_data_type;
 	bool compress_disable;
 	bool compress_handonly_disable;
