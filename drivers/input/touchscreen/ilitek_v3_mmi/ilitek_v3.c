@@ -861,7 +861,6 @@ int ili_fw_upgrade_handler(void *data)
 
 	if (!ilits->boot) {
 		ilits->boot = true;
-		ilits->touchs = 0;
 		ILI_INFO("Registre touch to input subsystem\n");
 		ili_input_register();
 
@@ -1630,8 +1629,6 @@ int ili_tddi_init(void)
 	atomic_set(&ilits->esd_stat, END);
 	atomic_set(&ilits->tp_sw_mode, END);
 	atomic_set(&ilits->ignore_report, END);
-
-	ilits->touchs = 0;
 
 	ili_ic_init();
 	ilitek_tddi_wq_init();

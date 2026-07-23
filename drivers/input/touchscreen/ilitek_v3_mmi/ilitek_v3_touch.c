@@ -1221,7 +1221,6 @@ void ili_touch_release_all_point(void)
 
 		input_report_key(ilits->input, BTN_TOUCH, 0);
 		input_report_key(ilits->input, BTN_TOOL_FINGER, 0);
-		ilits->touchs = 0;
 	} else {
 		ili_touch_release(0, 0, 0);
 	}
@@ -1246,23 +1245,6 @@ void ili_report_ap_mode(u8 *buf, int len)
 		ILI_ERR("Buffer too short: %d bytes, need at least %d\n",
 			len, P5_X_DEMO_MODE_PACKET_INFO_LEN + (5 * MAX_TOUCH_NUM) + 1);
 		return;
-	}
-
-	/* Reject zero-buffer I2C data (all 0x00 indicates failed read) */
-	{
-		bool all_zero = true;
-		int j, check_len = (len < 16) ? len : 16;
-
-		for (j = 0; j < check_len; j++) {
-			if (buf[j] != 0x00) {
-				all_zero = false;
-				break;
-			}
-		}
-		if (all_zero) {
-			ILI_DBG("Zero-buffer detected, ignoring\n");
-			return;
-		}
 	}
 
 	memset(touch_info, 0x0, sizeof(touch_info));
@@ -1348,64 +1330,44 @@ void ili_report_ap_mode(u8 *buf, int len)
 #endif
 	ILI_DBG("figner number = %d, LastTouch = %d\n", ilits->finger, ilits->last_touch);
 
-	if (MT_B_TYPE) {
-		u32 touchs = 0, released = 0;
-		bool va_reported = false;
-
-		for (i = 0; i < ilits->finger; i++) {
-			int slot = touch_info[i].id;
-			if (slot < MAX_TOUCH_NUM) {
-				touchs |= BIT(slot);
-				va_reported = true;
-				ili_touch_press(touch_info[i].x, touch_info[i].y, touch_info[i].pressure, slot);
-			}
-		}
-
-		released = ilits->touchs & ~touchs;
-		if (unlikely(released)) {
-			for (i = 0; i < MAX_TOUCH_NUM; i++) {
-				if (BIT(i) & released) {
-					ILI_DBG("[XOR]P%d UP!", i);
-					va_reported = true;
-					ili_touch_release(0, 0, i);
-				}
-			}
-		}
-
-		ilits->touchs = touchs;
-
-		if (va_reported) {
-			if (touchs) {
+	if (ilits->finger) {
+		if (MT_B_TYPE) {
+			for (i = 0; i < ilits->finger; i++) {
 				input_report_key(ilits->input, BTN_TOUCH, 1);
+				ili_touch_press(touch_info[i].x, touch_info[i].y, touch_info[i].pressure, touch_info[i].id);
 				input_report_key(ilits->input, BTN_TOOL_FINGER, 1);
-			} else {
-				input_report_key(ilits->input, BTN_TOUCH, 0);
-				input_report_key(ilits->input, BTN_TOOL_FINGER, 0);
-#ifdef ILI_TOUCH_LAST_TIME
-				ilits->last_event_time = ktime_get_boottime();
-				ILI_DBG("last touch, save last_event_time\n");
-#endif
 			}
-			input_sync(ilits->input);
-		}
-
-		ilits->last_touch = ilits->finger;
-	} else {
-		if (ilits->finger) {
+			for (i = 0; i < MAX_TOUCH_NUM; i++) {
+				if (ilits->curt_touch[i] == 0 && ilits->prev_touch[i] == 1)
+					ili_touch_release(0, 0, i);
+				ilits->prev_touch[i] = ilits->curt_touch[i];
+			}
+		} else {
 			for (i = 0; i < ilits->finger; i++)
 				ili_touch_press(touch_info[i].x, touch_info[i].y, touch_info[i].pressure, touch_info[i].id);
-			input_sync(ilits->input);
-			ilits->last_touch = ilits->finger;
-		} else {
-			if (ilits->last_touch) {
+		}
+		input_sync(ilits->input);
+		ilits->last_touch = ilits->finger;
+	} else {
+		if (ilits->last_touch) {
+			if (MT_B_TYPE) {
+				for (i = 0; i < MAX_TOUCH_NUM; i++) {
+					if (ilits->curt_touch[i] == 0 && ilits->prev_touch[i] == 1)
+						ili_touch_release(0, 0, i);
+					ilits->prev_touch[i] = ilits->curt_touch[i];
+				}
+				input_report_key(ilits->input, BTN_TOUCH, 0);
+				input_report_key(ilits->input, BTN_TOOL_FINGER, 0);
+			} else {
 				ili_touch_release(0, 0, 0);
-#ifdef ILI_TOUCH_LAST_TIME
-				ilits->last_event_time = ktime_get_boottime();
-				ILI_DBG("last touch, save last_event_time\n");
-#endif
-				input_sync(ilits->input);
-				ilits->last_touch = 0;
 			}
+			input_sync(ilits->input);
+			ilits->last_touch = 0;
+#ifdef ILI_TOUCH_LAST_TIME
+			//save last timestamp after last touch reported to avoid impacting multi and swipe touch
+			ilits->last_event_time = ktime_get_boottime();
+			ILI_DBG("last touch, save last_event_time\n");
+#endif
 		}
 	}
 	ilitek_tddi_touch_customer_data_parsing(buf);
@@ -1459,30 +1421,7 @@ void ili_pen_demo_mode_report_point(u8 *buf, int len)
 	int i = 0, pen_id_index = 0;
 	u32 xop = 0, yop = 0, PenStartIdx = 0;
 
-	if (len < P5_X_DEMO_MODE_PACKET_INFO_LEN + (5 * MAX_TOUCH_NUM) + 1) {
-		ILI_ERR("Pen demo: buffer too short: %d\n", len);
-		return;
-	}
-
-	/* Reject zero-buffer I2C data */
-	{
-		bool all_zero = true;
-		int j, check_len = (len < 16) ? len : 16;
-
-		for (j = 0; j < check_len; j++) {
-			if (buf[j] != 0x00) {
-				all_zero = false;
-				break;
-			}
-		}
-		if (all_zero) {
-			ILI_DBG("Pen demo: zero-buffer detected, ignoring\n");
-			return;
-		}
-	}
-
 	memset(touch_info, 0x0, sizeof(touch_info));
-	memset(ilits->curt_touch, 0, sizeof(ilits->curt_touch));
 
 	ilits->finger = 0;
 	ilits->pen = 0;
@@ -1590,14 +1529,6 @@ void ili_pen_demo_mode_report_point(u8 *buf, int len)
 					touch_info[PEN_INDEX].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 				}
 			}
-			/* Bounds check for pen coordinates */
-			if (!ilits->trans_xy &&
-			    (touch_info[PEN_INDEX].x >= ilits->panel_wid ||
-			     touch_info[PEN_INDEX].y >= ilits->panel_hei)) {
-				ILI_DBG("Pen out of bounds: (%d, %d)\n",
-					touch_info[PEN_INDEX].x, touch_info[PEN_INDEX].y);
-				continue;
-			}
 			touch_info[PEN_INDEX].id = i;
 			touch_info[PEN_INDEX].pressure = ( buf[PenStartIdx + TOUCH_PRESS_OFFSET] << 8 ) + buf[PenStartIdx + TOUCH_PRESS_OFFSET + 1];
 
@@ -1616,16 +1547,6 @@ void ili_pen_demo_mode_report_point(u8 *buf, int len)
 					touch_info[ilits->finger].x = ilits->max_x ? xop * ilits->panel_wid / ilits->max_x : 0;
 					touch_info[ilits->finger].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 				}
-			}
-			/* Bounds check for finger coordinates */
-			if (!ilits->trans_xy &&
-			    (touch_info[ilits->finger].x >= ilits->panel_wid ||
-			     touch_info[ilits->finger].y >= ilits->panel_hei)) {
-				ILI_DBG("Pen demo finger %d out of bounds: (%d, %d)\n",
-					i, touch_info[ilits->finger].x, touch_info[ilits->finger].y);
-				if (MT_B_TYPE)
-					ilits->curt_touch[i] = 0;
-				continue;
 			}
 			touch_info[ilits->finger].id = i;
 
@@ -1677,10 +1598,11 @@ void ili_pen_demo_mode_report_point(u8 *buf, int len)
 			if (MT_B_TYPE) {
 				/* Finger Touch */
 				for (i = 0; i < ilits->finger; i++) {
-					int slot = touch_info[i].id;
-					if (slot < MAX_TOUCH_NUM && ilits->curt_touch[slot] == 1) {
+					if (touch_info[i].id < MAX_TOUCH_NUM) {
 						ilits->pen_info.finger_touch = true;
-						ili_touch_press(touch_info[i].x, touch_info[i].y, touch_info[i].pressure, slot);
+						input_report_key(ilits->input, BTN_TOUCH, 1);
+						ili_touch_press(touch_info[i].x, touch_info[i].y, touch_info[i].pressure, touch_info[i].id);
+						input_report_key(ilits->input, BTN_TOOL_FINGER, 1);
 					}
 				}
 				/* Finger Release */
@@ -1690,8 +1612,6 @@ void ili_pen_demo_mode_report_point(u8 *buf, int len)
 					}
 					ilits->prev_touch[i] = ilits->curt_touch[i];
 				}
-				input_report_key(ilits->input, BTN_TOUCH, 1);
-				input_report_key(ilits->input, BTN_TOOL_FINGER, 1);
 			} else {
 				for (i = 0; i < ilits->finger; i++) {
 					if (touch_info[i].id < MAX_TOUCH_NUM) {
@@ -1741,7 +1661,6 @@ void ili_pen_debug_mode_report_point(u8 *buf, int len, u8 offset)
 	static u8 p[MAX_TOUCH_NUM];
 
 	memset(touch_info, 0x0, sizeof(touch_info));
-	memset(ilits->curt_touch, 0, sizeof(ilits->curt_touch));
 
 	ilits->finger = 0;
 	ilits->pen = 0;
@@ -1858,14 +1777,6 @@ void ili_pen_debug_mode_report_point(u8 *buf, int len, u8 offset)
 					touch_info[PEN_INDEX].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 				}
 			}
-			/* Bounds check for pen coordinates */
-			if (!ilits->trans_xy &&
-			    (touch_info[PEN_INDEX].x >= ilits->panel_wid ||
-			     touch_info[PEN_INDEX].y >= ilits->panel_hei)) {
-				ILI_DBG("Pen debug: pen out of bounds: (%d, %d)\n",
-					touch_info[PEN_INDEX].x, touch_info[PEN_INDEX].y);
-				continue;
-			}
 
 			touch_info[PEN_INDEX].id = i;
 			touch_info[PEN_INDEX].pressure = ( buf[PenStartIdx + TOUCH_PRESS_OFFSET] << 8 ) + buf[PenStartIdx + TOUCH_PRESS_OFFSET + 1];
@@ -1885,16 +1796,6 @@ void ili_pen_debug_mode_report_point(u8 *buf, int len, u8 offset)
 					touch_info[ilits->finger].x = ilits->max_x ? xop * ilits->panel_wid / ilits->max_x : 0;
 					touch_info[ilits->finger].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 				}
-			}
-			/* Bounds check for finger coordinates */
-			if (!ilits->trans_xy &&
-			    (touch_info[ilits->finger].x >= ilits->panel_wid ||
-			     touch_info[ilits->finger].y >= ilits->panel_hei)) {
-				ILI_DBG("Pen debug finger %d out of bounds: (%d, %d)\n",
-					i, touch_info[ilits->finger].x, touch_info[ilits->finger].y);
-				if (MT_B_TYPE)
-					ilits->curt_touch[i] = 0;
-				continue;
 			}
 			touch_info[ilits->finger].id = i;
 
@@ -1999,7 +1900,6 @@ void ili_debug_mode_report_point(u8 *buf, int len)
 	static u8 p[MAX_TOUCH_NUM];
 
 	memset(touch_info, 0x0, sizeof(touch_info));
-	memset(ilits->curt_touch, 0, sizeof(ilits->curt_touch));
 
 	ilits->finger = 0;
 
@@ -2033,17 +1933,6 @@ void ili_debug_mode_report_point(u8 *buf, int len)
 				touch_info[ilits->finger].x = ilits->max_x ? xop * ilits->panel_wid / ilits->max_x : 0;
 				touch_info[ilits->finger].y = ilits->max_y ? yop * ilits->panel_hei / ilits->max_y : 0;
 			}
-		}
-
-		/* Bounds check: discard out-of-panel coordinates */
-		if (!ilits->trans_xy &&
-		    (touch_info[ilits->finger].x >= ilits->panel_wid ||
-		     touch_info[ilits->finger].y >= ilits->panel_hei)) {
-			ILI_DBG("Debug finger %d out of bounds: (%d, %d)\n",
-				i, touch_info[ilits->finger].x, touch_info[ilits->finger].y);
-			if (MT_B_TYPE)
-				ilits->curt_touch[i] = 0;
-			continue;
 		}
 
 		touch_info[ilits->finger].id = i;
