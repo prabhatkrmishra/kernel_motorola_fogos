@@ -54,6 +54,20 @@ config ZRAM_DEF_COMP
 	default "lz4hc" if ZRAM_DEF_COMP_LZ4HC
 	default "842" if ZRAM_DEF_COMP_842
 
+config ZRAM_DEFAULT_DISKSIZE
+	int "Default disksize for zram (in MB)"
+	depends on ZRAM
+	range 1 16
+	default 2
+	help
+	  Sets the default size of the zram block device(s) in gigabytes,
+	  used when no explicit disksize is provided via
+	  /sys/block/zramX/disksize at device creation time.
+
+	  This value is only a default; it can still be overridden per-device
+	  at runtime by writing a new size (in bytes) to
+	  /sys/block/zramX/disksize before the device is first used.
+
 config ZRAM_WRITEBACK
        bool "Write back incompressible or idle page to backing device"
        depends on ZRAM
