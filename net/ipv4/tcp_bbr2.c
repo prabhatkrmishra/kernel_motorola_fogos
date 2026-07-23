@@ -416,7 +416,7 @@ module_param_named(probe_rtt_mode_ms, bbr_probe_rtt_mode_ms, uint,   0644);
 module_param_named(probe_rtt_win_ms,  bbr_probe_rtt_win_ms,  uint,   0644);
 module_param_named(full_bw_thresh,    bbr_full_bw_thresh,    uint,   0644);
 module_param_named(full_bw_cnt,       bbr_full_bw_cnt,       uint,   0644);
-module_param_named(cwnd_tso_bduget,   bbr_cwnd_tso_budget,   uint,   0664);
+module_param_named(cwnd_tso_budget,   bbr_cwnd_tso_budget,   uint,   0664);
 module_param_named(extra_acked_gain,  bbr_extra_acked_gain,  int,    0664);
 module_param_named(extra_acked_win_rtts,
 		   bbr_extra_acked_win_rtts, uint,   0664);
@@ -615,7 +615,7 @@ static void bbr_debug(struct sock *sk, u32 acked,
 		 (rs->delivered) > 0 ?
 		 (1000 * rs->delivered_ce /
 		  (rs->delivered)) : 0,		      /* er: ECN rate x1000 */
-		 1000 * bbr->ecn_alpha >> BBR_SCALE,  /* ea: ECN alpha x1000 */
+		 (1000 * bbr->ecn_alpha) >> BBR_SCALE,  /* ea: ECN alpha x1000 */
 		 bbr->bw_hi == ~0U ?
 		   -1 : (s64)bbr_rate_kbps(sk, bbr->bw_hi), /* bwh */
 		 bbr->bw_lo == ~0U ?
@@ -1087,7 +1087,7 @@ static void bbr_check_full_bw_reached(struct sock *sk,
 	if (bbr_full_bw_reached(sk) || !bbr->round_start || rs->is_app_limited)
 		return;
 
-	bw_thresh = (u64)bbr->full_bw * bbr->params.full_bw_thresh >> BBR_SCALE;
+	bw_thresh = ((u64)bbr->full_bw * bbr->params.full_bw_thresh) >> BBR_SCALE;
 	if (bbr_max_bw(sk) >= bw_thresh) {
 		bbr->full_bw = bbr_max_bw(sk);
 		bbr->full_bw_cnt = 0;
@@ -1493,7 +1493,7 @@ static bool bbr2_is_inflight_too_high(const struct sock *sk,
 	u32 loss_thresh, ecn_thresh;
 
 	if (rs->lost > 0 && rs->tx_in_flight) {
-		loss_thresh = (u64)rs->tx_in_flight * bbr->params.loss_thresh >>
+		loss_thresh = ((u64)rs->tx_in_flight * bbr->params.loss_thresh) >>
 				BBR_SCALE;
 		if (rs->lost > loss_thresh)
 			return true;
@@ -1501,7 +1501,7 @@ static bool bbr2_is_inflight_too_high(const struct sock *sk,
 
 	if (rs->delivered_ce > 0 && rs->delivered > 0 &&
 	    bbr->ecn_eligible && bbr->params.ecn_thresh) {
-		ecn_thresh = (u64)rs->delivered * bbr->params.ecn_thresh >>
+		ecn_thresh = ((u64)rs->delivered * bbr->params.ecn_thresh) >>
 				BBR_SCALE;
 		if (rs->delivered_ce > ecn_thresh)
 			return true;
@@ -1542,7 +1542,7 @@ static u32 bbr2_inflight_hi_from_lost_skb(const struct sock *sk,
 	if (WARN_ON_ONCE(lost_prev < 0))
 		return ~0U;
 
-	/* At what prefix of this lost skb did losss rate exceed loss_thresh? */
+	/* At what prefix of this lost skb did loss rate exceed loss_thresh? */
 	loss_budget = (u64)inflight_prev * loss_thresh + BBR_UNIT - 1;
 	loss_budget >>= BBR_SCALE;
 	if (lost_prev >= loss_budget) {
@@ -1657,9 +1657,9 @@ static void bbr2_adapt_lower_bounds(struct sock *sk)
 			bbr->bw_lo = bbr_max_bw(sk);
 		if (bbr->inflight_lo == ~0U)
 			bbr->inflight_lo = tp->snd_cwnd;
-		ecn_inflight_lo = (u64)bbr->inflight_lo * ecn_cut >> BBR_SCALE;
+		ecn_inflight_lo = ((u64)bbr->inflight_lo * ecn_cut) >> BBR_SCALE;
 		if (bbr->params.ecn_bw_lo)
-			ecn_bw_lo = (u64)bbr->bw_lo     * ecn_cut >> BBR_SCALE;
+			ecn_bw_lo = ((u64)bbr->bw_lo * ecn_cut) >> BBR_SCALE;
 	} else {
 		ecn_inflight_lo = ~0U;
 		ecn_bw_lo = ~0U;
@@ -1675,12 +1675,12 @@ static void bbr2_adapt_lower_bounds(struct sock *sk)
 		beta = bbr->params.beta;
 		bbr->bw_lo =
 			max_t(u32, bbr->bw_latest,
-			      (u64)bbr->bw_lo *
-			      (BBR_UNIT - beta) >> BBR_SCALE);
+			      ((u64)bbr->bw_lo *
+			       (BBR_UNIT - beta)) >> BBR_SCALE);
 		bbr->inflight_lo =
 			max_t(u32, bbr->inflight_latest,
-			      (u64)bbr->inflight_lo *
-			      (BBR_UNIT - beta) >> BBR_SCALE);
+			      ((u64)bbr->inflight_lo *
+			       (BBR_UNIT - beta)) >> BBR_SCALE);
 	}
 
 	/* Adjust to the lower of the levels implied by loss or ECN. */
@@ -1898,7 +1898,7 @@ static void bbr2_handle_inflight_too_high_via_ecn(struct sock *sk,
 		ecn_cut = bbr2_ecn_cut(sk);
 		if (bbr->bw_hi == ~0U)
 			bbr->bw_hi = bbr_max_bw(sk);
-		bbr->bw_hi = (u64)bbr->bw_hi * ecn_cut >> BBR_SCALE;
+		bbr->bw_hi = ((u64)bbr->bw_hi * ecn_cut) >> BBR_SCALE;
 	}
 }
 
@@ -1921,8 +1921,8 @@ static void bbr2_handle_inflight_too_high(struct sock *sk,
 	 */
 	if (!rs->is_app_limited) {
 		bbr->inflight_hi = max_t(u32, rs->tx_in_flight,
-					 (u64)bbr2_target_inflight(sk) *
-					 (BBR_UNIT - beta) >> BBR_SCALE);
+					 ((u64)bbr2_target_inflight(sk) *
+					  (BBR_UNIT - beta)) >> BBR_SCALE);
 		bbr2_handle_inflight_too_high_via_ecn(sk, rs);
 	}
 	if (bbr->mode == BBR_PROBE_BW && bbr->cycle_idx == BBR_BW_PROBE_UP)
@@ -2367,7 +2367,7 @@ out:
  */
 
 /* On losses, scale down inflight and pacing rate by beta scaled by BBR_SCALE.
- * No loss response when 0. Max allwed value is 255.
+ * No loss response when 0. Max allowed value is 255.
  */
 static u32 bbr_beta = BBR_UNIT * 30 / 100;
 
@@ -2383,7 +2383,7 @@ static u32 bbr_ecn_alpha_gain = BBR_UNIT * 1 / 16;  /* 1/16 = 6.25% */
 static u32 bbr_ecn_alpha_init = BBR_UNIT;	/* 1.0, to respond quickly */
 
 /* On ECN, cut inflight_lo to (1 - ecn_factor * ecn_alpha) scaled by BBR_SCALE.
- * No ECN based bounding when 0. Max allwed value is 255.
+ * No ECN based bounding when 0. Max allowed value is 255.
  */
 static u32 bbr_ecn_factor = BBR_UNIT * 1 / 2;	    /* 1/2 = 50% */
 
