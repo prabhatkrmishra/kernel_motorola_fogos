@@ -32,4 +32,4 @@ moto_swap-objs += hybridswap/hybridswap_eswap.o
 moto_swap-objs += hybridswap/hybridswap_swapd.o
 moto_swap-objs += $(ZRAM_SRC)/zcomp.o
 
-obj-$(CONFIG_MOTO_FOGOS_MODULES) += moto_swap.o
+obj-$(CONFIG_HYBRIDSWAP_ZRAM) += moto_swap.o
