@@ -2542,13 +2542,16 @@ static ssize_t ilitek_node_ioctl_write(struct file *filp, const char *buff, size
 
 	}else if (strncmp(cmd, "disableicemode", strlen(cmd)) == 0) {
 		bool mcu;
-		u8 mode;
+
 		mcu = data[1] & BIT(0);
-		mode = data[2] & 0x0F;
 
 		if (ilits->cascade_info_block.nNum != 0) {
 #if (TDDI_INTERFACE == BUS_I2C)
-		ili_ice_mode_ctrl_by_mode(DISABLE, mcu, mode);
+		{
+			u8 mode = data[2] & 0x0F;
+
+			ili_ice_mode_ctrl_by_mode(DISABLE, mcu, mode);
+		}
 #else
 		ili_ice_mode_ctrl(DISABLE, mcu);
 #endif

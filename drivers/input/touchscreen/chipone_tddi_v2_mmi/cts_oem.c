@@ -639,9 +639,7 @@ static void dump_tsdata_to_seq_file(struct seq_file *m,
 
         len = dump_tsdata_row_to_buffer(linebuf, sizeof(linebuf),
             data, cols, NULL, "\n", ',');
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
         (void) len;
-#endif
         seq_puts(m, linebuf);
 
         data += hw_cols;
@@ -732,9 +730,7 @@ static void dump_comp_cap_to_seq_file(struct seq_file *m,
         len = dump_comp_cap_row_to_buffer(linebuf, sizeof(linebuf),
             data, cols, NULL, "\n", ',');
         seq_puts(m, linebuf);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
         (void) len;
-#endif
         data += hw_cols;
     }
 }
@@ -1341,10 +1337,8 @@ static int cts_factory_test_show(struct seq_file *m, void *v)
     const struct firmware *limit_fw = NULL;
     struct cts_limit limit;
     char header[7] = {'C', 'h', 'i', 'p', 'o', 'n', 'e'};
-    int normal_rawdata_frames;
     int normal_rawdata_min;
     int normal_rawdata_max;
-    int normal_noise_frames;
     int normal_noise_max;
     int normal_open_min;
     int normal_short_min;
@@ -1415,16 +1409,8 @@ static int cts_factory_test_show(struct seq_file *m, void *v)
     cts_info("gstrlp_noise_frames   : %d", limit.gstrlp_noise_frames);
     cts_info("gstrlp_noise_max      : %d", limit.gstrlp_noise_max);
 
-    normal_rawdata_frames = limit.normal_rawdata_frames;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-    (void) normal_rawdata_frames;
-#endif
     normal_rawdata_min = limit.normal_rawdata_min;
     normal_rawdata_max = limit.normal_rawdata_max;
-    normal_noise_frames = limit.normal_noise_frames;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
-    (void)normal_noise_frames;
-#endif
     normal_noise_max = limit.normal_noise_max;
     normal_open_min = limit.normal_open_min;
     normal_short_min = limit.normal_short_min;

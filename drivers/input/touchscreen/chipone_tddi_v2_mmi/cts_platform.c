@@ -462,9 +462,7 @@ int cts_plat_is_normal_mode(struct cts_platform_data *pdata)
 
     cts_set_normal_addr(pdata->cts_dev);
     cts_data = container_of(pdata->cts_dev, struct chipone_ts_data, cts_dev);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,15,0)
     (void)cts_data;
-#endif
     ret = cts_tcs_get_fw_id(pdata->cts_dev, &fwid);
 /*
         addr = CTS_DEVICE_FW_REG_CHIP_TYPE;

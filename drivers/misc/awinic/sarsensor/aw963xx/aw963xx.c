@@ -67,7 +67,7 @@ static void aw963xx_convert_little_endian_2_big_endian(struct aw_bin *aw_bin)
  */
 static int32_t aw963xx_sram_fill_not_wrote_area(void *load_bin_para, uint32_t offset)
 {
-	uint8_t buf[AW963XX_SRAM_UPDATE_ONE_PACK_SIZE + 2] = { 0 };
+	uint8_t *buf = NULL;
 	uint8_t *r_buf = NULL;
 	int32_t ret = 0;
 	uint32_t i = 0;
@@ -78,9 +78,17 @@ static int32_t aw963xx_sram_fill_not_wrote_area(void *load_bin_para, uint32_t of
 						((AW963XX_SRAM_END_ADDR - offset) / AW963XX_SRAM_UPDATE_ONE_PACK_SIZE) + 1;
 	struct aw_sar *p_sar = (struct aw_sar *)load_bin_para;
 
+	buf = (uint8_t *)devm_kzalloc(p_sar->dev,
+		AW963XX_SRAM_UPDATE_ONE_PACK_SIZE + 2, GFP_KERNEL);
+	if (buf == NULL) {
+		AWLOGE(p_sar->dev, "devm_kzalloc buf error");
+		return -AW_ERR;
+	}
+
 	r_buf = (uint8_t *)devm_kzalloc(p_sar->dev, AW963XX_SRAM_UPDATE_ONE_PACK_SIZE, GFP_KERNEL);
 	if (r_buf == NULL) {
-		AWLOGE(p_sar->dev, "devm_kzalloc error");
+		AWLOGE(p_sar->dev, "devm_kzalloc r_buf error");
+		devm_kfree(p_sar->dev, buf);
 		return -AW_ERR;
 	}
 
@@ -88,7 +96,7 @@ static int32_t aw963xx_sram_fill_not_wrote_area(void *load_bin_para, uint32_t of
 	AWLOGI(p_sar->dev, "pack_cnt = %d", pack_cnt);
 	AWLOGI(p_sar->dev, "offset = 0x%x", offset);
 
-	memset(buf, 0xff, sizeof(buf));
+	memset(buf, 0xff, AW963XX_SRAM_UPDATE_ONE_PACK_SIZE + 2);
 
 	for (i = 0; i < pack_cnt; i++) {
 		memset(r_buf, 0, AW963XX_SRAM_UPDATE_ONE_PACK_SIZE);
@@ -99,49 +107,47 @@ static int32_t aw963xx_sram_fill_not_wrote_area(void *load_bin_para, uint32_t of
 			ret = aw_sar_i2c_write_seq(p_sar->i2c, buf, AW963XX_SRAM_UPDATE_ONE_PACK_SIZE + 2);
 			if (ret != AW_OK) {
 				AWLOGI(p_sar->dev, "cnt%d, write_seq error!", i);
-				devm_kfree(p_sar->dev, r_buf);
-				return ret;
+				goto exit_free;
 			}
 			ret = aw_sar_i2c_read_seq(p_sar->i2c, buf, 2, r_buf, AW963XX_SRAM_UPDATE_ONE_PACK_SIZE);
 			if (ret != AW_OK) {
 				AWLOGI(p_sar->dev, "cnt%d, read_seq error!", i);
-				devm_kfree(p_sar->dev, r_buf);
-				return ret;
+				goto exit_free;
 			}
 			if (memcmp(&buf[2], r_buf, AW963XX_SRAM_UPDATE_ONE_PACK_SIZE) != 0) {
 				AWLOGE(p_sar->dev, "read is not equal to write ");
-				devm_kfree(p_sar->dev, r_buf);
-				return -AW_ERR;
+				ret = -AW_ERR;
+				goto exit_free;
 			}
 		} else {
 			ret = aw_sar_i2c_write_seq(p_sar->i2c, buf, last_pack_len + 2);
 			if (ret != AW_OK) {
 				AWLOGI(p_sar->dev, "cnt%d, write_seq error!", i);
-				devm_kfree(p_sar->dev, r_buf);
-				return ret;
+				goto exit_free;
 			}
 			ret = aw_sar_i2c_read_seq(p_sar->i2c, buf, 2, r_buf, last_pack_len);
 			if (ret != AW_OK) {
 				AWLOGI(p_sar->dev, "cnt%d, read_seq error!", i);
-				devm_kfree(p_sar->dev, r_buf);
-				return ret;
+				goto exit_free;
 			}
 			if (memcmp(&buf[2], r_buf, last_pack_len) != 0) {
 				AWLOGE(p_sar->dev, "read is not equal to write ");
-				devm_kfree(p_sar->dev, r_buf);
-				return -AW_ERR;
+				ret = -AW_ERR;
+				goto exit_free;
 			}
 		}
 	}
 
+exit_free:
+	devm_kfree(p_sar->dev, buf);
 	devm_kfree(p_sar->dev, r_buf);
 
-	return AW_OK;
+	return ret;
 }
 
 static int32_t aw963xx_sram_data_write(struct aw_bin *aw_bin, void *load_bin_para)
 {
-	uint8_t buf[AW963XX_SRAM_UPDATE_ONE_PACK_SIZE + 2] = { 0 };
+	uint8_t *buf = NULL;
 	uint8_t *r_buf = NULL;
 	int32_t ret = 0;
 	uint32_t i = 0;
@@ -154,9 +160,17 @@ static int32_t aw963xx_sram_data_write(struct aw_bin *aw_bin, void *load_bin_par
 	struct aw_sar *p_sar = (struct aw_sar *)load_bin_para;
 	uint32_t download_addr_with_ofst = 0;
 
+	buf = (uint8_t *)devm_kzalloc(p_sar->dev,
+		AW963XX_SRAM_UPDATE_ONE_PACK_SIZE + 2, GFP_KERNEL);
+	if (buf == NULL) {
+		AWLOGE(p_sar->dev, "devm_kzalloc buf error");
+		return -AW_ERR;
+	}
+
 	r_buf = (uint8_t *)devm_kzalloc(p_sar->dev, AW963XX_SRAM_UPDATE_ONE_PACK_SIZE, GFP_KERNEL);
 	if (r_buf == NULL) {
-		AWLOGE(p_sar->dev, "devm_kzalloc error");
+		AWLOGE(p_sar->dev, "devm_kzalloc r_buf error");
+		devm_kfree(p_sar->dev, buf);
 		return -AW_ERR;
 	}
 
@@ -179,51 +193,49 @@ static int32_t aw963xx_sram_data_write(struct aw_bin *aw_bin, void *load_bin_par
 			ret = aw_sar_i2c_write_seq(p_sar->i2c, buf, AW963XX_SRAM_UPDATE_ONE_PACK_SIZE + 2);
 			if (ret != AW_OK) {
 				AWLOGI(p_sar->dev, "cnt%d, write_seq error!", i);
-				devm_kfree(p_sar->dev, r_buf);
-				return ret;
+				goto exit_free;
 			}
 			ret = aw_sar_i2c_read_seq(p_sar->i2c, buf, 2, r_buf, AW963XX_SRAM_UPDATE_ONE_PACK_SIZE);
 			if (ret != AW_OK) {
 				AWLOGI(p_sar->dev, "cnt%d, read_seq error!", i);
-				devm_kfree(p_sar->dev, r_buf);
-				return ret;
+				goto exit_free;
 			}
 			if (memcmp(&buf[2], r_buf, AW963XX_SRAM_UPDATE_ONE_PACK_SIZE) != 0) {
 				AWLOGE(p_sar->dev, "read is not equal to write ");
-				devm_kfree(p_sar->dev, r_buf);
-				return -AW_ERR;
+				ret = -AW_ERR;
+				goto exit_free;
 			}
 		} else { // last pack process
 			memcpy(&buf[2], &aw_bin->info.data[start_index + i * AW963XX_SRAM_UPDATE_ONE_PACK_SIZE], last_pack_len);
 			ret = aw_sar_i2c_write_seq(p_sar->i2c, buf, last_pack_len + 2);
 			if (ret != AW_OK) {
 				AWLOGI(p_sar->dev, "cnt%d, write_seq error!", i);
-				devm_kfree(p_sar->dev, r_buf);
-				return ret;
+				goto exit_free;
 			}
 			ret = aw_sar_i2c_read_seq(p_sar->i2c, buf, 2, r_buf, last_pack_len);
 			if (ret != AW_OK) {
 				AWLOGI(p_sar->dev, "cnt%d, read_seq error!", i);
-				devm_kfree(p_sar->dev, r_buf);
-				return ret;
+				goto exit_free;
 			}
 			if (memcmp(&buf[2], r_buf, last_pack_len) != 0) {
 				AWLOGE(p_sar->dev, "read is not equal to write ");
-				devm_kfree(p_sar->dev, r_buf);
-				return ret;
+				ret = -AW_ERR;
+				goto exit_free;
 			}
 			/* fill 0xff in the area that not worte. */
 			ret = aw963xx_sram_fill_not_wrote_area(load_bin_para, download_addr_with_ofst + last_pack_len);
 			if (ret != AW_OK) {
 				AWLOGI(p_sar->dev, "cnt%d, sram_fill_not_wrote_area error!", i);
-				devm_kfree(p_sar->dev, r_buf);
-				return ret;
+				goto exit_free;
 			}
 		}
 	}
+
+exit_free:
+	devm_kfree(p_sar->dev, buf);
 	devm_kfree(p_sar->dev, r_buf);
 
-	return AW_OK;
+	return ret;
 }
 
 static int32_t aw963xx_update_firmware(struct aw_bin *aw_bin, void *load_bin_para)
