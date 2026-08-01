@@ -1329,7 +1329,19 @@ int ili_report_handler(void)
 	}
 
 	if (pid == P5_X_INFO_HEADER_PACKET_ID) {
+		if (rlen <= P5_X_INFO_HEADER_LENGTH) {
+			ILI_ERR("Header packet with invalid length: %d\n", rlen);
+			ret = -EINVAL;
+			goto out;
+		}
 		trdata = ilits->tr_buf + P5_X_INFO_HEADER_LENGTH;
+		/*
+		 * rlen still counts from the start of tr_buf; shrink it so
+		 * downstream length checks, the report-switch byte read
+		 * (buf[len - 2]) and debug-data copies operate on the actual
+		 * payload bytes remaining after the header.
+		 */
+		rlen -= P5_X_INFO_HEADER_LENGTH;
 		pid = trdata[0];
 	}
 
