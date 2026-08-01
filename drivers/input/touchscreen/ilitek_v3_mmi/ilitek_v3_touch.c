@@ -1237,14 +1237,37 @@ void ili_report_ap_mode(u8 *buf, int len)
 	memset(ilits->curt_touch, 0, sizeof(ilits->curt_touch));
 
 	/*
-	 * Validate buffer length against worst-case access pattern.
+	 * Validate buffer length against the worst-case access pattern for
+	 * the active report format.
+	 *
 	 * High-res mode reads buf[(5 * i) + 5 + P5_X_DEMO_MODE_PACKET_INFO_LEN]
-	 * where i = MAX_TOUCH_NUM - 1, requiring at least this many bytes.
+	 * where i = MAX_TOUCH_NUM - 1, requiring at least
+	 * P5_X_DEMO_MODE_PACKET_INFO_LEN + (5 * MAX_TOUCH_NUM) + 1 bytes.
+	 * Low-res customer-on reads buf[(4 * i) + 4 + P5_X_DEMO_MODE_PACKET_INFO_LEN]
+	 * (P5_X_DEMO_MODE_PACKET_INFO_LEN + (4 * MAX_TOUCH_NUM) + 1 bytes) and
+	 * low-res customer-off reads buf[(4 * i) + 4] ((4 * MAX_TOUCH_NUM) + 1 bytes).
+	 *
+	 * The driver negotiates 43-byte packets for customer-off low-res, so a
+	 * single high-res floor would drop every report in that configuration.
 	 */
-	if (len < P5_X_DEMO_MODE_PACKET_INFO_LEN + (5 * MAX_TOUCH_NUM) + 1) {
-		ILI_ERR("Buffer too short: %d bytes, need at least %d\n",
-			len, P5_X_DEMO_MODE_PACKET_INFO_LEN + (5 * MAX_TOUCH_NUM) + 1);
-		return;
+	if (ilits->rib.nReportResolutionMode == POSITION_HIGH_RESOLUTION) {
+		if (len < P5_X_DEMO_MODE_PACKET_INFO_LEN + (5 * MAX_TOUCH_NUM) + 1) {
+			ILI_ERR("Buffer too short: %d bytes, need at least %d\n",
+				len, P5_X_DEMO_MODE_PACKET_INFO_LEN + (5 * MAX_TOUCH_NUM) + 1);
+			return;
+		}
+	} else if (ilits->rib.nCustomerType != ilits->customertype_off) {
+		if (len < P5_X_DEMO_MODE_PACKET_INFO_LEN + (4 * MAX_TOUCH_NUM) + 1) {
+			ILI_ERR("Buffer too short: %d bytes, need at least %d\n",
+				len, P5_X_DEMO_MODE_PACKET_INFO_LEN + (4 * MAX_TOUCH_NUM) + 1);
+			return;
+		}
+	} else {
+		if (len < (4 * MAX_TOUCH_NUM) + 1) {
+			ILI_ERR("Buffer too short: %d bytes, need at least %d\n",
+				len, (4 * MAX_TOUCH_NUM) + 1);
+			return;
+		}
 	}
 
 	memset(touch_info, 0x0, sizeof(touch_info));
