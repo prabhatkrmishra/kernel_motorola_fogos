@@ -3492,6 +3492,18 @@ dput_out:
 		susfs_auto_add_sus_ksu_default_mount(dir_name);
 	}
 #endif
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+	// - Mounts attached through the classic mount(2) syscall (overlayfs
+	//   directory merges, MS_MOVE) never pass through do_loopback() or
+	//   move_mount(), so they were never added to the per-app try-umount
+	//   list and stayed visible to non-su apps even though their sus
+	//   mnt_ids keep them out of mountinfo.
+	// - path is still valid here; it is path_put'ed below.
+	if (!retval && susfs_is_auto_add_try_umount_for_bind_mount_enabled &&
+	    susfs_is_current_ksu_domain()) {
+		susfs_auto_add_try_umount_for_bind_mount(&path);
+	}
+#endif
 	path_put(&path);
 	return retval;
 }
