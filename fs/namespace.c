@@ -4486,24 +4486,32 @@ void susfs_detach_sus_mounts_current_ns(void)
 	namespace_lock();
 	lock_mount_hash();
 
-	// Phase 1: collect candidates without mutating the tree they hang on
+	// Phase 1: take a reference for every candidate and park it on a
+	// private list.  The references keep the entries alive no matter
+	// what phase 2 tears down around them.
 	list_for_each_entry_safe(mnt, tmp, &ns->list, mnt_list) {
 		if (mnt->mnt_id >= DEFAULT_SUS_MNT_ID &&
-		    !(mnt->mnt.mnt_flags & MNT_LOCKED))
+		    !(mnt->mnt.mnt_flags & MNT_LOCKED)) {
+			mntget(&mnt->mnt);
 			list_move_tail(&mnt->mnt_list, &graveyard);
+		}
 	}
 
 	// Phase 2: detach; umount_tree() gathers whole subtrees and marks
-	// them MNT_UMOUNT, so skip entries already consumed as part of an
-	// earlier subtree
+	// them MNT_UMOUNT, so skip entries already consumed by an earlier
+	// subtree.
 	list_for_each_entry_safe(mnt, tmp, &graveyard, mnt_list) {
-		if (mnt->mnt.mnt_flags & MNT_UMOUNT)
-			continue;
-		umount_tree(mnt, UMOUNT_PROPAGATE);
+		if (!(mnt->mnt.mnt_flags & MNT_UMOUNT))
+			umount_tree(mnt, UMOUNT_PROPAGATE);
 	}
 
 	unlock_mount_hash();
 	namespace_unlock();
+
+	// Drop the phase-1 references only after the locks are released;
+	// until now they were what kept every graveyard entry valid.
+	list_for_each_entry_safe(mnt, tmp, &graveyard, mnt_list)
+		mntput(&mnt->mnt);
 }
 #endif
 #ifdef CONFIG_KSU_SUSFS
