@@ -6,6 +6,7 @@
 #include <linux/printk.h>
 #include <linux/namei.h>
 #include <linux/list.h>
+#include <linux/rculist.h>
 #include <linux/init_task.h>
 #include <linux/spinlock.h>
 #include <linux/stat.h>
@@ -89,17 +90,8 @@ int susfs_add_sus_path(struct st_susfs_sus_path* __user user_info) {
 		SUSFS_LOGE("failed copying from userspace\n");
 		return 1;
 	}
-
-	spin_lock(&susfs_spin_lock);
-	hash_for_each_safe(SUS_PATH_HLIST, bkt, tmp_node, tmp_entry, node) {
-	if (!strcmp(tmp_entry->target_pathname, info.target_pathname)) {
-			hash_del(&tmp_entry->node);
-			kfree(tmp_entry);
-			update_hlist = true;
-			break;
-		}
-	}
-	spin_unlock(&susfs_spin_lock);
+	// userspace may fill the whole buffer without terminating it
+	info.target_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
 
 	new_entry = kmalloc(sizeof(struct st_susfs_sus_path_hlist), GFP_KERNEL);
 	if (!new_entry) {
@@ -109,31 +101,54 @@ int susfs_add_sus_path(struct st_susfs_sus_path* __user user_info) {
 
 	new_entry->target_ino = info.target_ino;
 	strncpy(new_entry->target_pathname, info.target_pathname, SUSFS_MAX_LEN_PATHNAME-1);
+	new_entry->target_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
 	if (susfs_update_sus_path_inode(new_entry->target_pathname)) {
 		kfree(new_entry);
 		return 1;
 	}
+
+	// Replace or insert in one locked section: the old delete-then-
+	// reinsert flow left a window where readers holding no lock could
+	// see the path missing, and two concurrent adds of the same path
+	// could create duplicates.
 	spin_lock(&susfs_spin_lock);
-	hash_add(SUS_PATH_HLIST, &new_entry->node, info.target_ino);
+	hash_for_each_safe(SUS_PATH_HLIST, bkt, tmp_node, tmp_entry, node) {
+		if (!strcmp(tmp_entry->target_pathname, new_entry->target_pathname)) {
+			hash_del(&tmp_entry->node);
+			kfree(tmp_entry);
+			update_hlist = true;
+			break;
+		}
+	}
+	// always re-add so the node is hashed under the current target_ino
+	hash_add(SUS_PATH_HLIST, &new_entry->node, new_entry->target_ino);
+	spin_unlock(&susfs_spin_lock);
+
 	if (update_hlist) {
 		SUSFS_LOGI("target_ino: '%lu', target_pathname: '%s' is successfully updated to SUS_PATH_HLIST\n",
-				new_entry->target_ino, new_entry->target_pathname);	
+				new_entry->target_ino, new_entry->target_pathname);
 	} else {
 		SUSFS_LOGI("target_ino: '%lu', target_pathname: '%s' is successfully added to SUS_PATH_HLIST\n",
 				new_entry->target_ino, new_entry->target_pathname);
 	}
-	spin_unlock(&susfs_spin_lock);
 	return 0;
 }
 
 int susfs_sus_ino_for_filldir64(unsigned long ino) {
 	struct st_susfs_sus_path_hlist *entry;
+	bool found = false;
 
+	// Writers delete and free entries under susfs_spin_lock, so this
+	// lookup must hold it too to avoid walking a freed entry.
+	spin_lock(&susfs_spin_lock);
 	hash_for_each_possible(SUS_PATH_HLIST, entry, node, ino) {
-		if (entry->target_ino == ino)
-			return 1;
+		if (entry->target_ino == ino) {
+			found = true;
+			break;
+		}
 	}
-	return 0;
+	spin_unlock(&susfs_spin_lock);
+	return found;
 }
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_PATH
 
@@ -183,6 +198,7 @@ int susfs_add_sus_mount(struct st_susfs_sus_mount* __user user_info) {
 	struct st_susfs_sus_mount_list *cursor = NULL, *temp = NULL;
 	struct st_susfs_sus_mount_list *new_list = NULL;
 	struct st_susfs_sus_mount info;
+	bool updated = false;
 
 	if (copy_from_user(&info, user_info, sizeof(info))) {
 		SUSFS_LOGE("failed copying from userspace\n");
@@ -199,18 +215,26 @@ int susfs_add_sus_mount(struct st_susfs_sus_mount* __user user_info) {
 	info.target_dev = old_decode_dev(info.target_dev);
 #endif /* defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64) */
 
+	// userspace may fill the whole buffer without terminating it
+	info.target_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
+
+	spin_lock(&susfs_spin_lock);
 	list_for_each_entry_safe(cursor, temp, &LH_SUS_MOUNT, list) {
 		if (unlikely(!strcmp(cursor->info.target_pathname, info.target_pathname))) {
-			spin_lock(&susfs_spin_lock);
 			memcpy(&cursor->info, &info, sizeof(info));
-			spin_unlock(&susfs_spin_lock);
-			// susfs_update_sus_mount_inode() does a kern_path() which may
-			// sleep, so it must not be called under the spinlock.
-			susfs_update_sus_mount_inode(info.target_pathname);
-			SUSFS_LOGI("target_pathname: '%s', target_dev: '%lu', is successfully updated to LH_SUS_MOUNT\n",
-						info.target_pathname, info.target_dev);
-			return 0;
+			updated = true;
+			break;
 		}
+	}
+	spin_unlock(&susfs_spin_lock);
+
+	if (updated) {
+		// susfs_update_sus_mount_inode() does a kern_path() which may
+		// sleep, so it must not be called under the spinlock.
+		susfs_update_sus_mount_inode(info.target_pathname);
+		SUSFS_LOGI("target_pathname: '%s', target_dev: '%lu', is successfully updated to LH_SUS_MOUNT\n",
+					info.target_pathname, info.target_dev);
+		return 0;
 	}
 
 	new_list = kmalloc(sizeof(struct st_susfs_sus_mount_list), GFP_KERNEL);
@@ -352,22 +376,13 @@ int susfs_add_sus_kstat(struct st_susfs_sus_kstat* __user user_info) {
 		SUSFS_LOGE("failed copying from userspace\n");
 		return 1;
 	}
+	// userspace may fill the whole buffer without terminating it
+	info.target_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
 
 	if (strlen(info.target_pathname) == 0) {
 		SUSFS_LOGE("target_pathname is an empty string\n");
 		return 1;
 	}
-
-	spin_lock(&susfs_spin_lock);
-	hash_for_each_safe(SUS_KSTAT_HLIST, bkt, tmp_node, tmp_entry, node) {
-		if (!strcmp(tmp_entry->info.target_pathname, info.target_pathname)) {
-			hash_del(&tmp_entry->node);
-			kfree(tmp_entry);
-			update_hlist = true;
-			break;
-		}
-	}
-	spin_unlock(&susfs_spin_lock);
 
 	new_entry = kmalloc(sizeof(struct st_susfs_sus_kstat_hlist), GFP_KERNEL);
 	if (!new_entry) {
@@ -393,7 +408,19 @@ int susfs_add_sus_kstat(struct st_susfs_sus_kstat* __user user_info) {
 		return 1;
 	}
 
+	// Replace or insert in one locked section: the old delete-then-
+	// reinsert flow left a window where readers holding no lock could
+	// see the entry missing, and two concurrent adds of the same path
+	// could create duplicates.
 	spin_lock(&susfs_spin_lock);
+	hash_for_each_safe(SUS_KSTAT_HLIST, bkt, tmp_node, tmp_entry, node) {
+		if (!strcmp(tmp_entry->info.target_pathname, info.target_pathname)) {
+			hash_del(&tmp_entry->node);
+			kfree(tmp_entry);
+			update_hlist = true;
+			break;
+		}
+	}
 	hash_add(SUS_KSTAT_HLIST, &new_entry->node, info.target_ino);
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 	if (update_hlist) {
@@ -448,6 +475,8 @@ int susfs_update_sus_kstat(struct st_susfs_sus_kstat* __user user_info) {
 		SUSFS_LOGE("failed copying from userspace\n");
 		return 1;
 	}
+	// userspace may fill the whole buffer without terminating it
+	info.target_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
 
 	// Lookup first without holding the lock across the slow operations:
 	// both susfs_update_sus_kstat_inode() (kern_path) and kmalloc() below
@@ -509,6 +538,9 @@ int susfs_update_sus_kstat(struct st_susfs_sus_kstat* __user user_info) {
 void susfs_sus_ino_for_generic_fillattr(unsigned long ino, struct kstat *stat) {
 	struct st_susfs_sus_kstat_hlist *entry;
 
+	// Hold the lock: entries can be freed concurrently by
+	// susfs_add_sus_kstat()/susfs_update_sus_kstat().
+	spin_lock(&susfs_spin_lock);
 	hash_for_each_possible(SUS_KSTAT_HLIST, entry, node, ino) {
 		if (entry->target_ino == ino) {
 			stat->dev = entry->info.spoofed_dev;
@@ -523,21 +555,24 @@ void susfs_sus_ino_for_generic_fillattr(unsigned long ino, struct kstat *stat) {
 			stat->ctime.tv_nsec = entry->info.spoofed_ctime_tv_nsec;
 			stat->blocks = entry->info.spoofed_blocks;
 			stat->blksize = entry->info.spoofed_blksize;
-			return;
+			break;
 		}
 	}
+	spin_unlock(&susfs_spin_lock);
 }
 
 void susfs_sus_ino_for_show_map_vma(unsigned long ino, dev_t *out_dev, unsigned long *out_ino) {
 	struct st_susfs_sus_kstat_hlist *entry;
 
+	spin_lock(&susfs_spin_lock);
 	hash_for_each_possible(SUS_KSTAT_HLIST, entry, node, ino) {
 		if (entry->target_ino == ino) {
 			*out_dev = entry->info.spoofed_dev;
 			*out_ino = entry->info.spoofed_ino;
-			return;
+			break;
 		}
 	}
+	spin_unlock(&susfs_spin_lock);
 }
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 
@@ -553,13 +588,8 @@ int susfs_add_try_umount(struct st_susfs_try_umount* __user user_info) {
 		SUSFS_LOGE("failed copying from userspace\n");
 		return 1;
 	}
-
-	list_for_each_entry_safe(cursor, temp, &LH_TRY_UMOUNT_PATH, list) {
-		if (unlikely(!strcmp(info.target_pathname, cursor->info.target_pathname))) {
-			SUSFS_LOGE("target_pathname: '%s' is already created in LH_TRY_UMOUNT_PATH\n", info.target_pathname);
-			return 1;
-		}
-	}
+	// userspace may fill the whole buffer without terminating it
+	info.target_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
 
 	new_list = kmalloc(sizeof(struct st_susfs_try_umount_list), GFP_KERNEL);
 	if (!new_list) {
@@ -568,10 +598,23 @@ int susfs_add_try_umount(struct st_susfs_try_umount* __user user_info) {
 	}
 
 	memcpy(&new_list->info, &info, sizeof(info));
-
 	INIT_LIST_HEAD(&new_list->list);
+
 	spin_lock(&susfs_spin_lock);
-	list_add_tail(&new_list->list, &LH_TRY_UMOUNT_PATH);
+	list_for_each_entry_safe(cursor, temp, &LH_TRY_UMOUNT_PATH, list) {
+		if (unlikely(!strcmp(info.target_pathname, cursor->info.target_pathname))) {
+			spin_unlock(&susfs_spin_lock);
+			kfree(new_list);
+			SUSFS_LOGE("target_pathname: '%s' is already created in LH_TRY_UMOUNT_PATH\n", info.target_pathname);
+			return 1;
+		}
+	}
+	// - susfs_try_umount() walks this list lock-free while umounting,
+	//   which is safe only because the list is append-only and inserts
+	//   use the rcu variant (readers see either a fully initialized
+	//   entry or none).  Do not add removal of entries without also
+	//   reworking the reader.
+	list_add_tail_rcu(&new_list->list, &LH_TRY_UMOUNT_PATH);
 	spin_unlock(&susfs_spin_lock);
 	SUSFS_LOGI("target_pathname: '%s', mnt_mode: %d, is successfully added to LH_TRY_UMOUNT_PATH\n", new_list->info.target_pathname, new_list->info.mnt_mode);
 	return 0;
@@ -580,6 +623,14 @@ int susfs_add_try_umount(struct st_susfs_try_umount* __user user_info) {
 void susfs_try_umount(uid_t target_uid) {
 	struct st_susfs_try_umount_list *cursor = NULL;
 
+	/* Walked without a lock on purpose: entries are never removed and
+	 * inserts use list_add_tail_rcu(), so this traversal can only miss
+	 * a concurrently added entry, never dereference freed memory.
+	 * Holding a sleepable lock here is not an option either - the
+	 * umounts below take namespace_sem, which would invert against
+	 * do_loopback() calling susfs_auto_add_try_umount_for_bind_mount()
+	 * while holding namespace_sem.
+	 */
 	// We should umount in reversed order
 	list_for_each_entry_reverse(cursor, &LH_TRY_UMOUNT_PATH, list) {
 		if (cursor->info.mnt_mode == TRY_UMOUNT_DEFAULT) {
@@ -627,19 +678,6 @@ void susfs_auto_add_try_umount_for_bind_mount(struct path *path) {
 	}
 #endif
 
-	list_for_each_entry_safe(cursor, temp, &LH_TRY_UMOUNT_PATH, list) {
-#ifdef CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
-		if (is_magic_mount_path && strstr(dpath, cursor->info.target_pathname)) {
-			goto out_free_pathname;
-		}
-#endif
-		if (unlikely(!strcmp(dpath, cursor->info.target_pathname))) {
-			SUSFS_LOGE("target_pathname: '%s', ino: %lu, is already created in LH_TRY_UMOUNT_PATH\n",
-							dpath, path->dentry->d_inode->i_ino);
-			goto out_free_pathname;
-		}
-	}
-
 	new_list = kmalloc(sizeof(struct st_susfs_try_umount_list), GFP_KERNEL);
 	if (!new_list) {
 		SUSFS_LOGE("no enough memory\n");
@@ -657,17 +695,36 @@ void susfs_auto_add_try_umount_for_bind_mount(struct path *path) {
 #ifdef CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
 out_add_to_list:
 #endif
-
+	new_list->info.target_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
 	new_list->info.mnt_mode = TRY_UMOUNT_DETACH;
 
 	INIT_LIST_HEAD(&new_list->list);
 	spin_lock(&susfs_spin_lock);
-	list_add_tail(&new_list->list, &LH_TRY_UMOUNT_PATH);
+	list_for_each_entry_safe(cursor, temp, &LH_TRY_UMOUNT_PATH, list) {
+#ifdef CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT
+		if (is_magic_mount_path && strstr(dpath, cursor->info.target_pathname)) {
+			goto out_unlock_free;
+		}
+#endif
+		if (unlikely(!strcmp(dpath, cursor->info.target_pathname))) {
+			SUSFS_LOGE("target_pathname: '%s', ino: %lu, is already created in LH_TRY_UMOUNT_PATH\n",
+							dpath, path->dentry->d_inode->i_ino);
+			goto out_unlock_free;
+		}
+	}
+	// see susfs_add_try_umount(): append-only list + rcu insert keeps the
+	// lock-free walk in susfs_try_umount() safe
+	list_add_tail_rcu(&new_list->list, &LH_TRY_UMOUNT_PATH);
 	spin_unlock(&susfs_spin_lock);
 	SUSFS_LOGI("target_pathname: '%s', ino: %lu, mnt_mode: %d, is successfully added to LH_TRY_UMOUNT_PATH\n",
 					new_list->info.target_pathname, path->dentry->d_inode->i_ino, new_list->info.mnt_mode);
 out_free_pathname:
 	kfree(pathname);
+	return;
+out_unlock_free:
+	spin_unlock(&susfs_spin_lock);
+	kfree(new_list);
+	goto out_free_pathname;
 }
 #endif // #ifdef CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
 #endif // #ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
@@ -687,6 +744,9 @@ int susfs_set_uname(struct st_susfs_uname* __user user_info) {
 		SUSFS_LOGE("failed copying from userspace.\n");
 		return 1;
 	}
+	// force termination before doing strcmp()/strncpy() on these
+	info.release[__NEW_UTS_LEN] = '\0';
+	info.version[__NEW_UTS_LEN] = '\0';
 
 	spin_lock(&susfs_uname_spin_lock);
 	if (!strcmp(info.release, "default")) {
@@ -706,10 +766,17 @@ int susfs_set_uname(struct st_susfs_uname* __user user_info) {
 }
 
 void susfs_spoof_uname(struct new_utsname* tmp) {
-	if (unlikely(my_uname.release[0] == '\0' || spin_is_locked(&susfs_uname_spin_lock)))
+	// Take the lock for real: reading my_uname unlocked raced against a
+	// concurrent susfs_set_uname(), and the old spin_is_locked() peek
+	// skipped spoofing non-deterministically instead of synchronizing.
+	spin_lock(&susfs_uname_spin_lock);
+	if (unlikely(my_uname.release[0] == '\0')) {
+		spin_unlock(&susfs_uname_spin_lock);
 		return;
+	}
 	strncpy(tmp->release, my_uname.release, __NEW_UTS_LEN);
 	strncpy(tmp->version, my_uname.version, __NEW_UTS_LEN);
+	spin_unlock(&susfs_uname_spin_lock);
 }
 #endif // #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
 
@@ -821,17 +888,9 @@ int susfs_add_open_redirect(struct st_susfs_open_redirect* __user user_info) {
 		SUSFS_LOGE("failed copying from userspace\n");
 		return 1;
 	}
-
-	spin_lock(&susfs_spin_lock);
-	hash_for_each_safe(OPEN_REDIRECT_HLIST, bkt, tmp_node, tmp_entry, node) {
-		if (!strcmp(tmp_entry->target_pathname, info.target_pathname)) {
-			hash_del(&tmp_entry->node);
-			kfree(tmp_entry);
-			update_hlist = true;
-			break;
-		}
-	}
-	spin_unlock(&susfs_spin_lock);
+	// userspace may fill the whole buffers without terminating them
+	info.target_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
+	info.redirected_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
 
 	new_entry = kmalloc(sizeof(struct st_susfs_open_redirect_hlist), GFP_KERNEL);
 	if (!new_entry) {
@@ -842,35 +901,63 @@ int susfs_add_open_redirect(struct st_susfs_open_redirect* __user user_info) {
 	new_entry->target_ino = info.target_ino;
 	strncpy(new_entry->target_pathname, info.target_pathname, SUSFS_MAX_LEN_PATHNAME-1);
 	strncpy(new_entry->redirected_pathname, info.redirected_pathname, SUSFS_MAX_LEN_PATHNAME-1);
+	new_entry->target_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
+	new_entry->redirected_pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
 	if (susfs_update_open_redirect_inode(new_entry)) {
 		SUSFS_LOGE("failed adding path '%s' to OPEN_REDIRECT_HLIST\n", new_entry->target_pathname);
 		kfree(new_entry);
 		return 1;
 	}
 
+	// Replace or insert in one locked section, mirroring
+	// susfs_add_sus_path(): no window where the redirect is missing,
+	// and no duplicate entries from concurrent adds.
 	spin_lock(&susfs_spin_lock);
-	hash_add(OPEN_REDIRECT_HLIST, &new_entry->node, info.target_ino);
+	hash_for_each_safe(OPEN_REDIRECT_HLIST, bkt, tmp_node, tmp_entry, node) {
+		if (!strcmp(tmp_entry->target_pathname, new_entry->target_pathname)) {
+			hash_del(&tmp_entry->node);
+			kfree(tmp_entry);
+			update_hlist = true;
+			break;
+		}
+	}
+	// always re-add so the node is hashed under the current target_ino
+	hash_add(OPEN_REDIRECT_HLIST, &new_entry->node, new_entry->target_ino);
+	spin_unlock(&susfs_spin_lock);
+
 	if (update_hlist) {
 		SUSFS_LOGI("target_ino: '%lu', target_pathname: '%s', redirected_pathname: '%s', is successfully updated to OPEN_REDIRECT_HLIST\n",
-				new_entry->target_ino, new_entry->target_pathname, new_entry->redirected_pathname);	
+				new_entry->target_ino, new_entry->target_pathname, new_entry->redirected_pathname);
 	} else {
 		SUSFS_LOGI("target_ino: '%lu', target_pathname: '%s' redirected_pathname: '%s', is successfully added to OPEN_REDIRECT_HLIST\n",
 				new_entry->target_ino, new_entry->target_pathname, new_entry->redirected_pathname);
 	}
-	spin_unlock(&susfs_spin_lock);
 	return 0;
 }
 
 struct filename* susfs_get_redirected_path(unsigned long ino) {
 	struct st_susfs_open_redirect_hlist *entry;
+	char redirected_pathname[SUSFS_MAX_LEN_PATHNAME];
+	bool found = false;
 
+	// Match and copy under the lock; getname_kernel() allocates with
+	// GFP_KERNEL so it must run outside the spinlock.
+	spin_lock(&susfs_spin_lock);
 	hash_for_each_possible(OPEN_REDIRECT_HLIST, entry, node, ino) {
 		if (entry->target_ino == ino) {
-			SUSFS_LOGI("Redirect for ino: %lu\n", ino);
-			return getname_kernel(entry->redirected_pathname);
+			memcpy(redirected_pathname, entry->redirected_pathname,
+			       SUSFS_MAX_LEN_PATHNAME);
+			found = true;
+			break;
 		}
 	}
-	return ERR_PTR(-ENOENT);
+	spin_unlock(&susfs_spin_lock);
+
+	if (!found)
+		return ERR_PTR(-ENOENT);
+
+	SUSFS_LOGI("Redirect for ino: %lu\n", ino);
+	return getname_kernel(redirected_pathname);
 }
 #endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 
