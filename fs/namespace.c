@@ -4461,6 +4461,51 @@ void susfs_run_try_umount_for_current_mnt_ns(void) {
 	susfs_try_umount_all(current_uid().val);
 }
 #endif
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+/*
+ * Detach every sus-classified mount (mnt_id >= DEFAULT_SUS_MNT_ID) that is
+ * visible in the CALLER'S mount namespace.  This is the catch-all for the
+ * per-app umount path: every mount created under the KSU domain carries a
+ * sus mnt_id no matter which syscall attached it, so nothing can leak into
+ * a non-su app's namespace even when it was never registered in the
+ * try-umount list.  Real partitions always carry small mnt_ids and are
+ * structurally unreachable here.
+ *
+ * Must never be called for the initial (global) mount namespace.
+ */
+void susfs_detach_sus_mounts_current_ns(void)
+{
+	struct mnt_namespace *ns = current->nsproxy->mnt_ns;
+	struct mount *mnt, *tmp;
+	LIST_HEAD(graveyard);
+
+	if (!ns || ns == init_nsproxy.mnt_ns)
+		return;
+
+	namespace_lock();
+	lock_mount_hash();
+
+	// Phase 1: collect candidates without mutating the tree they hang on
+	list_for_each_entry_safe(mnt, tmp, &ns->list, mnt_list) {
+		if (mnt->mnt_id >= DEFAULT_SUS_MNT_ID &&
+		    !(mnt->mnt.mnt_flags & MNT_LOCKED))
+			list_move_tail(&mnt->mnt_list, &graveyard);
+	}
+
+	// Phase 2: detach; umount_tree() gathers whole subtrees and marks
+	// them MNT_UMOUNT, so skip entries already consumed as part of an
+	// earlier subtree
+	list_for_each_entry_safe(mnt, tmp, &graveyard, mnt_list) {
+		if (mnt->mnt.mnt_flags & MNT_UMOUNT)
+			continue;
+		umount_tree(mnt, UMOUNT_PROPAGATE);
+	}
+
+	unlock_mount_hash();
+	namespace_unlock();
+}
+#endif
 #ifdef CONFIG_KSU_SUSFS
 bool susfs_is_mnt_devname_ksu(struct path *path) {
 	struct mount *mnt;
