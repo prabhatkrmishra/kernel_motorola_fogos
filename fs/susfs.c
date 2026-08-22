@@ -203,10 +203,12 @@ int susfs_add_sus_mount(struct st_susfs_sus_mount* __user user_info) {
 		if (unlikely(!strcmp(cursor->info.target_pathname, info.target_pathname))) {
 			spin_lock(&susfs_spin_lock);
 			memcpy(&cursor->info, &info, sizeof(info));
-			susfs_update_sus_mount_inode(cursor->info.target_pathname);
-			SUSFS_LOGI("target_pathname: '%s', target_dev: '%lu', is successfully updated to LH_SUS_MOUNT\n",
-						cursor->info.target_pathname, cursor->info.target_dev);
 			spin_unlock(&susfs_spin_lock);
+			// susfs_update_sus_mount_inode() does a kern_path() which may
+			// sleep, so it must not be called under the spinlock.
+			susfs_update_sus_mount_inode(info.target_pathname);
+			SUSFS_LOGI("target_pathname: '%s', target_dev: '%lu', is successfully updated to LH_SUS_MOUNT\n",
+						info.target_pathname, info.target_dev);
 			return 0;
 		}
 	}
@@ -438,51 +440,70 @@ int susfs_update_sus_kstat(struct st_susfs_sus_kstat* __user user_info) {
 	struct st_susfs_sus_kstat info;
 	struct st_susfs_sus_kstat_hlist *new_entry, *tmp_entry;
 	struct hlist_node *tmp_node;
+	struct st_susfs_sus_kstat old_info;
 	int bkt;
-	int err = 0;
+	bool found = false;
 
 	if (copy_from_user(&info, user_info, sizeof(info))) {
 		SUSFS_LOGE("failed copying from userspace\n");
 		return 1;
 	}
 
+	// Lookup first without holding the lock across the slow operations:
+	// both susfs_update_sus_kstat_inode() (kern_path) and kmalloc() below
+	// may sleep, so they must not run under a spinlock.
 	spin_lock(&susfs_spin_lock);
 	hash_for_each_safe(SUS_KSTAT_HLIST, bkt, tmp_node, tmp_entry, node) {
 		if (!strcmp(tmp_entry->info.target_pathname, info.target_pathname)) {
-			if (susfs_update_sus_kstat_inode(tmp_entry->info.target_pathname)) {
-				err = 1;
-				goto out_spin_unlock;
-			}
-			new_entry = kmalloc(sizeof(struct st_susfs_sus_kstat_hlist), GFP_KERNEL);
-			if (!new_entry) {
-				SUSFS_LOGE("no enough memory\n");
-				err = 1;
-				goto out_spin_unlock;
-			}
-			memcpy(&new_entry->info, &tmp_entry->info, sizeof(tmp_entry->info));
-			SUSFS_LOGI("updating target_ino from '%lu' to '%lu' for pathname: '%s' in SUS_KSTAT_HLIST\n",
-							new_entry->info.target_ino, info.target_ino, info.target_pathname);
-			new_entry->target_ino = info.target_ino;
-			new_entry->info.target_ino = info.target_ino;
-			if (info.spoofed_size > 0) {
-				SUSFS_LOGI("updating spoofed_size from '%lld' to '%lld' for pathname: '%s' in SUS_KSTAT_HLIST\n",
-								new_entry->info.spoofed_size, info.spoofed_size, info.target_pathname);
-				new_entry->info.spoofed_size = info.spoofed_size;
-			}
-			if (info.spoofed_blocks > 0) {
-				SUSFS_LOGI("updating spoofed_blocks from '%llu' to '%llu' for pathname: '%s' in SUS_KSTAT_HLIST\n",
-								new_entry->info.spoofed_blocks, info.spoofed_blocks, info.target_pathname);
-				new_entry->info.spoofed_blocks = info.spoofed_blocks;
-			}
-			hash_del(&tmp_entry->node);
-			kfree(tmp_entry);
-			hash_add(SUS_KSTAT_HLIST, &new_entry->node, info.target_ino);
-			goto out_spin_unlock;
+			memcpy(&old_info, &tmp_entry->info, sizeof(old_info));
+			found = true;
+			break;
 		}
 	}
-out_spin_unlock:
 	spin_unlock(&susfs_spin_lock);
-	return err;
+
+	if (!found)
+		return 0;
+
+	if (susfs_update_sus_kstat_inode(info.target_pathname)) {
+		return 1;
+	}
+
+	new_entry = kmalloc(sizeof(struct st_susfs_sus_kstat_hlist), GFP_KERNEL);
+	if (!new_entry) {
+		SUSFS_LOGE("no enough memory\n");
+		return 1;
+	}
+
+	memcpy(&new_entry->info, &old_info, sizeof(old_info));
+	SUSFS_LOGI("updating target_ino from '%lu' to '%lu' for pathname: '%s' in SUS_KSTAT_HLIST\n",
+					new_entry->info.target_ino, info.target_ino, info.target_pathname);
+	new_entry->target_ino = info.target_ino;
+	new_entry->info.target_ino = info.target_ino;
+	if (info.spoofed_size > 0) {
+		SUSFS_LOGI("updating spoofed_size from '%lld' to '%lld' for pathname: '%s' in SUS_KSTAT_HLIST\n",
+						new_entry->info.spoofed_size, info.spoofed_size, info.target_pathname);
+		new_entry->info.spoofed_size = info.spoofed_size;
+	}
+	if (info.spoofed_blocks > 0) {
+		SUSFS_LOGI("updating spoofed_blocks from '%llu' to '%llu' for pathname: '%s' in SUS_KSTAT_HLIST\n",
+						new_entry->info.spoofed_blocks, info.spoofed_blocks, info.target_pathname);
+		new_entry->info.spoofed_blocks = info.spoofed_blocks;
+	}
+
+	// Remove by pathname again instead of using a stale node pointer,
+	// as the entry could have been replaced while we were unlocked.
+	spin_lock(&susfs_spin_lock);
+	hash_for_each_safe(SUS_KSTAT_HLIST, bkt, tmp_node, tmp_entry, node) {
+		if (!strcmp(tmp_entry->info.target_pathname, info.target_pathname)) {
+			hash_del(&tmp_entry->node);
+			kfree(tmp_entry);
+			break;
+		}
+	}
+	hash_add(SUS_KSTAT_HLIST, &new_entry->node, info.target_ino);
+	spin_unlock(&susfs_spin_lock);
+	return 0;
 }
 
 void susfs_sus_ino_for_generic_fillattr(unsigned long ino, struct kstat *stat) {
@@ -708,23 +729,31 @@ void susfs_set_log(bool enabled) {
 
 /* spoof_cmdline_or_bootconfig */
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+#include <linux/mutex.h>
 static char *fake_cmdline_or_bootconfig = NULL;
+/* strncpy_from_user() may sleep while faulting in the user string, and
+ * the proc show reader sleeps as well, so guard this buffer with a mutex
+ * instead of susfs_spin_lock.
+ */
+static DEFINE_MUTEX(susfs_fake_cmdline_lock);
+
 int susfs_set_cmdline_or_bootconfig(char* __user user_fake_cmdline_or_bootconfig) {
 	int res;
 
+	mutex_lock(&susfs_fake_cmdline_lock);
 	if (!fake_cmdline_or_bootconfig) {
 		// 4096 is enough I guess
 		fake_cmdline_or_bootconfig = kmalloc(SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE, GFP_KERNEL);
 		if (!fake_cmdline_or_bootconfig) {
 			SUSFS_LOGE("no enough memory\n");
+			mutex_unlock(&susfs_fake_cmdline_lock);
 			return -ENOMEM;
 		}
 	}
 
-	spin_lock(&susfs_spin_lock);
 	memset(fake_cmdline_or_bootconfig, 0, SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE);
 	res = strncpy_from_user(fake_cmdline_or_bootconfig, user_fake_cmdline_or_bootconfig, SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE-1);
-	spin_unlock(&susfs_spin_lock);
+	mutex_unlock(&susfs_fake_cmdline_lock);
 
 	if (res > 0) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,0)
@@ -739,11 +768,15 @@ int susfs_set_cmdline_or_bootconfig(char* __user user_fake_cmdline_or_bootconfig
 }
 
 int susfs_spoof_cmdline_or_bootconfig(struct seq_file *m) {
+	int ret = 1;
+
+	mutex_lock(&susfs_fake_cmdline_lock);
 	if (fake_cmdline_or_bootconfig != NULL) {
 		seq_puts(m, fake_cmdline_or_bootconfig);
-		return 0;
+		ret = 0;
 	}
-	return 1;
+	mutex_unlock(&susfs_fake_cmdline_lock);
+	return ret;
 }
 #endif
 
