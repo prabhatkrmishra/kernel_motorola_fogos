@@ -3493,13 +3493,16 @@ dput_out:
 	}
 #endif
 #ifdef CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
-	// - Mounts attached through the classic mount(2) syscall (overlayfs
-	//   directory merges, MS_MOVE) never pass through do_loopback() or
-	//   move_mount(), so they were never added to the per-app try-umount
-	//   list and stayed visible to non-su apps even though their sus
-	//   mnt_ids keep them out of mountinfo.
+	// - Register only NEW overlayfs mounts: magic-mount style directory
+	//   merges come through here instead of do_loopback()/move_mount().
+	// - Registering every mount(2) destination is far too broad: ksud's
+	//   own tmpfs/bind/remount operations (/data, workdirs, ...) would
+	//   end up in the try-umount list and get detached from app
+	//   namespaces, since list entries umount without the devname=="KSU"
+	//   validation.
 	// - path is still valid here; it is path_put'ed below.
-	if (!retval && susfs_is_auto_add_try_umount_for_bind_mount_enabled &&
+	if (!retval && type_page && !strcmp(type_page, "overlay") &&
+	    susfs_is_auto_add_try_umount_for_bind_mount_enabled &&
 	    susfs_is_current_ksu_domain()) {
 		susfs_auto_add_try_umount_for_bind_mount(&path);
 	}
