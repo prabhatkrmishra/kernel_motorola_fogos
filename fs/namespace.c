@@ -3945,6 +3945,19 @@ SYSCALL_DEFINE5(move_mount,
 	else
 		ret = do_move_mount(&from_path, &to_path);
 
+#ifdef CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+	// - Mounts attached through the new mount API (fsmount + move_mount)
+	//   never pass through do_loopback(), so without this they never land
+	//   in the per-app try-umount list and stay visible to non-su apps
+	//   even though they are hidden from mountinfo.
+	// - to_path is still valid here; it is path_put'ed at out_to below.
+	if (!ret && !(flags & MOVE_MOUNT_SET_GROUP) &&
+	    susfs_is_auto_add_try_umount_for_bind_mount_enabled &&
+	    susfs_is_current_ksu_domain()) {
+		susfs_auto_add_try_umount_for_bind_mount(&to_path);
+	}
+#endif
+
 out_to:
 	path_put(&to_path);
 out_from:
