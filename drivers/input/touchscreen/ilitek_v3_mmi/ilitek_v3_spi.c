@@ -876,13 +876,15 @@ err_update_buf:
 
 static int ilitek_spi_remove(struct spi_device *spi)
 {
-	struct touch_bus_info *info =
-	container_of(to_spi_driver(spi->dev.driver),
-		struct touch_bus_info, bus_driver);
-
 	ILI_INFO();
 
-	return info->hwif->plat_remove();
+	/*
+	 * Tear down probe resources with DISABLE so ili_interface_dev_exit()
+	 * skips spi_unregister_driver(): unregistering the driver from
+	 * inside its own remove callback would wait on ourselves.
+	 */
+	ili_dev_remove(DISABLE);
+	return 0;
 }
 
 static struct spi_device_id tp_spi_id[] = {
