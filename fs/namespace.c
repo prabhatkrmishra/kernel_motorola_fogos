@@ -150,6 +150,27 @@ static int susfs_mnt_alloc_id(struct mount *mnt)
 	mnt->mnt_id = res;
 	return 0;
 }
+
+/*
+ * Fake mnt_ids handed to zygote-cloned mounts must stay strictly below
+ * DEFAULT_SUS_MNT_ID.  The counter advances once per cloned mount, i.e.
+ * by the size of a whole namespace (~100-250) per app launch, so an
+ * unbounded counter crosses the sus threshold after a few hundred
+ * launches: every fresh clone then looks like a sus mount - copy_mnt_ns()
+ * stops backing up its real id, mnt_free_id() returns ids that were never
+ * allocated from susfs_mnt_id_ida, and the try-umount/detach paths tear
+ * down ordinary mounts.  Wrap the counter inside a dedicated band instead;
+ * ids only have to be unique among the few hundred mounts of one cloned
+ * namespace, so wraparound is harmless.
+ */
+#define SUSFS_FAKE_MNT_ID_FLOOR	8192
+
+static inline int susfs_next_fake_mnt_id(u64 *last)
+{
+	if (++*last >= DEFAULT_SUS_MNT_ID)
+		*last = SUSFS_FAKE_MNT_ID_FLOOR;
+	return (int)*last;
+}
 #endif
 static int mnt_alloc_id(struct mount *mnt)
 {
@@ -1084,7 +1105,7 @@ bypass_orig_flow:
 	// If caller process is zygote, then it is a normal mount, so we just reorder the mnt_id
 	if (susfs_is_current_zygote_domain()) {
 		mnt->mnt.susfs_mnt_id_backup = mnt->mnt_id;
-		mnt->mnt_id = current->susfs_last_fake_mnt_id++;
+		mnt->mnt_id = susfs_next_fake_mnt_id(&current->susfs_last_fake_mnt_id);
 	}
 #endif
 
@@ -1239,7 +1260,7 @@ bypass_orig_flow:
 	// If caller process is zygote and not doing unshare, so we just reorder the mnt_id
 	if (likely(is_current_zygote_domain) && !(flag & CL_ZYGOTE_COPY_MNT_NS)) {
 		mnt->mnt.susfs_mnt_id_backup = mnt->mnt_id;
-		mnt->mnt_id = current->susfs_last_fake_mnt_id++;
+		mnt->mnt_id = susfs_next_fake_mnt_id(&current->susfs_last_fake_mnt_id);
 	}
 #endif
 
@@ -3585,7 +3606,7 @@ struct mnt_namespace *copy_mnt_ns(unsigned long flags, struct mnt_namespace *ns,
 	int copy_flags;
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 	bool is_zygote_pid = susfs_is_current_zygote_domain();
-	int last_entry_mnt_id = 0;
+	u64 last_entry_mnt_id = 0;
 #endif
 
 	BUG_ON(!ns);
@@ -3670,7 +3691,7 @@ struct mnt_namespace *copy_mnt_ns(unsigned long flags, struct mnt_namespace *ns,
 				continue;
 			}
 			q->mnt.susfs_mnt_id_backup = q->mnt_id;
-			q->mnt_id = last_entry_mnt_id++;
+			q->mnt_id = susfs_next_fake_mnt_id(&last_entry_mnt_id);
 		}
 	}
 	// Assign the 'last_entry_mnt_id' to 'current->susfs_last_fake_mnt_id' for later use.
