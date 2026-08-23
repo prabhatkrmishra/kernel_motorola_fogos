@@ -709,10 +709,7 @@ static int ilitek_spi_probe(struct spi_device *spi)
 	struct touch_bus_info *info =
 	container_of(to_spi_driver(spi->dev.driver),
 		struct touch_bus_info, bus_driver);
-
-#ifdef ILI_MTK_CHECK_PANEL
-	int ret;
-#endif
+	int ret = 0;
 
 	ILI_INFO("ilitek spi probe\n");
 
@@ -743,32 +740,37 @@ static int ilitek_spi_probe(struct spi_device *spi)
 	ilits->update_buf = kzalloc(MAX_HEX_FILE_SIZE, GFP_KERNEL | GFP_DMA);
 	if (ERR_ALLOC_MEM(ilits->update_buf)) {
 		ILI_ERR("fw kzalloc error\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_update_buf;
 	}
 
 	/* Used for receiving touch data only, do not mix up with others. */
 	ilits->tr_buf = kzalloc(TR_BUF_SIZE, GFP_ATOMIC);
 	if (ERR_ALLOC_MEM(ilits->tr_buf)) {
 		ILI_ERR("failed to allocate touch report buffer\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_tr_buf;
 	}
 
 	ilits->spi_tx = kzalloc(SPI_TX_BUF_SIZE, GFP_KERNEL | GFP_DMA);
 	if (ERR_ALLOC_MEM(ilits->spi_tx)) {
 		ILI_ERR("Failed to allocate spi tx buffer\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_spi_tx;
 	}
 
 	ilits->spi_rx = kzalloc(SPI_RX_BUF_SIZE, GFP_KERNEL | GFP_DMA);
 	if (ERR_ALLOC_MEM(ilits->spi_rx)) {
 		ILI_ERR("Failed to allocate spi rx buffer\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_spi_rx;
 	}
 
 	ilits->gcoord = kzalloc(sizeof(struct gesture_coordinate), GFP_KERNEL);
 	if (ERR_ALLOC_MEM(ilits->gcoord)) {
 		ILI_ERR("Failed to allocate gresture coordinate buffer\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_gcoord;
 	}
 
 	ilits->i2c = NULL;
@@ -853,16 +855,34 @@ static int ilitek_spi_probe(struct spi_device *spi)
 	ILI_INFO("gesture eanble:%d\n", ilits->gesture);
 #endif
 
-	if (ili_core_spi_setup(SPI_CLK) < 0)
-		return -EINVAL;
+	if (ili_core_spi_setup(SPI_CLK) < 0) {
+		ret = -EINVAL;
+		goto err_gcoord;
+	}
 
 	return info->hwif->plat_probe();
+
+err_gcoord:
+	kfree(ilits->spi_rx);
+err_spi_rx:
+	kfree(ilits->spi_tx);
+err_spi_tx:
+	kfree(ilits->tr_buf);
+err_tr_buf:
+	kfree(ilits->update_buf);
+err_update_buf:
+	return ret;
 }
 
 static int ilitek_spi_remove(struct spi_device *spi)
 {
+	struct touch_bus_info *info =
+	container_of(to_spi_driver(spi->dev.driver),
+		struct touch_bus_info, bus_driver);
+
 	ILI_INFO();
-	return 0;
+
+	return info->hwif->plat_remove();
 }
 
 static struct spi_device_id tp_spi_id[] = {
