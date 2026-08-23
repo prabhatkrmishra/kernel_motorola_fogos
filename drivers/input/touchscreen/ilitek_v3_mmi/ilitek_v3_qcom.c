@@ -421,6 +421,11 @@ static irqreturn_t ilitek_plat_isr_bottom_half(int irq, void *dev_id)
 
 void ili_irq_unregister(void)
 {
+	/* Only free what a successful register actually requested. */
+	if (atomic_read(&ilits->irq_stat) != ENABLE)
+		return;
+
+	atomic_set(&ilits->irq_stat, DISABLE);
 	devm_free_irq(ilits->dev, ilits->irq_num, NULL);
 }
 
@@ -450,8 +455,8 @@ int ili_irq_register(int type)
 
 	if (ret != 0)
 		ILI_ERR("Failed to register irq handler, irq = %d, ret = %d\n", ilits->irq_num, ret);
-
-	atomic_set(&ilits->irq_stat, ENABLE);
+	else
+		atomic_set(&ilits->irq_stat, ENABLE);
 
 	return ret;
 }

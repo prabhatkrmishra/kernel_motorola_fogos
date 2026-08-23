@@ -1744,6 +1744,13 @@ void ili_dev_remove(bool flag)
 	if (!ilits)
 		return;
 
+	/*
+	 * Quiesce the IRQ first: it is devm-managed and would otherwise stay
+	 * live until after this callback returns, letting the report thread
+	 * run against the buffers freed below.
+	 */
+	ili_irq_unregister();
+
 	gpio_free(ilits->tp_int);
 	gpio_free(ilits->tp_rst);
 #if ENABLE_WQ_ESD
