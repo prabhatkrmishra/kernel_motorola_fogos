@@ -252,7 +252,7 @@ int file_write(struct file_buffer *file, bool new_open)
 
 static int ilitek_debug_node_buff_control(bool open)
 {
-	int i, ret;
+	int i, ret = 0;
 
 	ilits->dnp = open;
 
@@ -269,6 +269,7 @@ static int ilitek_debug_node_buff_control(bool open)
 			}
 			ipio_kfree((void **)&ilits->dbl);
 		}
+		ipio_vfree((void **)&ilits->outputStrArr);
 
 		ilits->dbl = kzalloc(TR_BUF_LIST_SIZE * sizeof(*ilits->dbl), GFP_KERNEL);
 		if (ERR_ALLOC_MEM(ilits->dbl)) {
@@ -304,7 +305,7 @@ out:
 
 static int ilitek_debug_all_node_buff_control(bool open)
 {
-	int i, ret;
+	int i, ret = 0;
 
 	ilits->dlnp = open;
 

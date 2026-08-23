@@ -1259,7 +1259,10 @@ int ili_report_handler(void)
 		goto out;
 	}
 
-	memset(ilits->tr_buf, 0x0, TR_BUF_SIZE);
+	/* Clear only the packet region: every read below is bounded by rlen,
+	 * so zeroing the whole 6K buffer on every touch interrupt is waste.
+	 */
+	memset(ilits->tr_buf, 0x0, rlen);
 
 	ret = ilits->wrapper(NULL, 0, ilits->tr_buf, rlen, OFF, OFF);
 
