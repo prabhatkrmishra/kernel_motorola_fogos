@@ -3,7 +3,7 @@ KMI_GENERATION=2
 
 LLVM=1
 LLVM_IAS=1
-CLANG_PREBUILT_BIN=prebuilts-master/clang/host/linux-x86/clang-r416183b/bin
+CLANG_PREBUILT_BIN=prebuilts-master/clang/host/linux-x86/clang-r547379/bin
 DEPMOD=depmod
 BUILDTOOLS_PREBUILT_BIN=build/build-tools/path/linux-x86
 
