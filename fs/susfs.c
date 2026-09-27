@@ -296,6 +296,10 @@ void susfs_auto_add_sus_ksu_default_mount(const char __user *to_pathname) {
 		goto out_free_pathname;
 		return;
 	}
+	// strncpy_from_user() does not terminate when it copies the full
+	// count, so a >=255 byte path leaves pathname[] unterminated and
+	// the kern_path() below runs strlen() off the end of the kmalloc.
+	pathname[SUSFS_MAX_LEN_PATHNAME-1] = '\0';
 	if ((!strncmp(pathname, "/data/adb/modules", 17) ||
 		 !strncmp(pathname, "/debug_ramdisk", 14) ||
 		 !strncmp(pathname, "/system", 7) ||
