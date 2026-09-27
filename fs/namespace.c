@@ -4618,6 +4618,26 @@ void susfs_detach_sus_mounts_current_ns(void)
 }
 #endif
 #ifdef CONFIG_KSU_SUSFS
+/*
+ * True if the mount behind @path is one susfs allocated an id for, i.e. a
+ * mount KSU created. Callers that want to unmount "KSU's mounts and nothing
+ * else" must use this rather than the devname check below: susfs hands out
+ * mnt_id values from DEFAULT_SUS_MNT_ID upward and the kernel tests that
+ * bound in several places, whereas mnt_devname is only ever a copy of the
+ * caller's source string and nothing assigns "KSU" to it.
+ */
+bool susfs_is_mnt_sus(struct path *path) {
+	struct mount *mnt;
+
+	if (path && path->mnt) {
+		mnt = real_mount(path->mnt);
+		if (mnt && mnt->mnt_id >= DEFAULT_SUS_MNT_ID) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool susfs_is_mnt_devname_ksu(struct path *path) {
 	struct mount *mnt;
 
