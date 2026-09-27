@@ -27,7 +27,10 @@ static char rand_drv_path[MAX_DRV_NAME+1] = "/dev/";
 static bool is_sus_su_enabled_before = false;
 
 extern bool susfs_is_allow_su(void);
-extern void ksu_escape_to_root(void);
+/* returns the escape result; the FIFO path discards it, but the module
+ * defines this as int (app_profile.h) and a shared header or a stricter
+ * -Wmissing-prototypes would turn the mismatch into a hard error */
+extern int ksu_escape_to_root(void);
 
 static void gen_rand_drv_name(char *buffer, size_t min_length, size_t max_length) {
     const char *symbols = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-+@#:=";
