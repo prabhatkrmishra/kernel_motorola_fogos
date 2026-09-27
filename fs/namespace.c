@@ -4597,7 +4597,14 @@ void susfs_detach_sus_mounts_current_ns(void)
 	do {
 		again = false;
 		list_for_each_entry(mnt, &ns->list, mnt_list) {
+			// mnt_has_parent() is required, not an optimisation:
+			// umount_tree(..., UMOUNT_PROPAGATE) calls
+			// propagate_mount_unlock(), which BUG_ON()s on
+			// parent == mnt. A namespace root and a detached fsmount
+			// both satisfy that, so filter them out here rather than
+			// taking UMOUNT_CONNECTED for the whole walk.
 			if (mnt->mnt_id >= DEFAULT_SUS_MNT_ID &&
+			    mnt_has_parent(mnt) &&
 			    !(mnt->mnt.mnt_flags & MNT_LOCKED)) {
 				umount_tree(mnt, UMOUNT_PROPAGATE);
 				again = true;
