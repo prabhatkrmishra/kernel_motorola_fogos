@@ -924,11 +924,24 @@ static void hybridswap_disable(struct zram * zram)
 	}
 
 #ifdef CONFIG_HYBRIDSWAP_CORE
+	/*
+	 * Clears the enable flags only.  It holds no per-device state, so
+	 * there is nothing here for the zram argument to scope.
+	 */
 	hybridswap_core_disable();
 #endif
 
 #ifdef CONFIG_HYBRIDSWAP_SWAPD
-	swapd_exit();
+	/*
+	 * Scoped to the device swapd is actually bound to.  This used to
+	 * tear swapd down for whichever device the sysfs writer happened
+	 * to be writing to, so a write against a second zram stopped a
+	 * live swapd on a device it never owned, and left that device
+	 * bound with nothing managing it.  Only hybridswap_exit() should
+	 * stop swapd unconditionally, and it passes no device.
+	 */
+	if (!zram || hybridswap_swapd_zram() == zram)
+		swapd_exit();
 #endif
 	hybridswap_enabled = false;
 }

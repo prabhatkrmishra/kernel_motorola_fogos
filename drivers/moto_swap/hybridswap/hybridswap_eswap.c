@@ -1908,8 +1908,19 @@ static void update_size_info(struct zram *zram, u32 index)
 
 	if (!zram_test_flag(zram, index, ZRAM_IN_BD))
 		return;
-	if (!zram->infos)
+	/*
+	 * The accounting below needs infos and cannot run without it, but
+	 * the flag must not outlive that.  Our only caller clears ZRAM_WB
+	 * either side of this call and zeroes the handle, so returning
+	 * early with ZRAM_IN_BD still set would leave a slot claiming a
+	 * backing copy that no longer exists, describing storage the
+	 * tables it points into are gone.  Losing the counters is
+	 * unavoidable once infos is detached; lying about the slot is not.
+	 */
+	if (!zram->infos) {
+		zram_clear_flag(zram, index, ZRAM_IN_BD);
 		return;
+	}
 
 	eswapid = esentry_extid(zram_get_handle(zram, index));
 	hybp(HYB_DEBUG, "eswapid %d index %d\n", eswapid, index);

@@ -1487,7 +1487,7 @@ compress_again:
 	 */
 	if (!handle)
 		handle = zs_malloc(zram->mem_pool, comp_len,
-				__GFP_KSWAPD_RECLAIM |
+				GFP_NOIO |
 				__GFP_NOWARN |
 				__GFP_HIGHMEM |
 				__GFP_MOVABLE |
@@ -1496,8 +1496,16 @@ compress_again:
 	if (!handle) {
 		zcomp_stream_put(zram->comp);
 		atomic64_inc(&zram->stats.writestall);
+		/*
+		 * The per-cpu compression stream was put above, so sleeping
+		 * is allowed on this slow path - which is what the comment
+		 * above describes, and the only reason the first attempt
+		 * used GFP_NOIO.  It is also the only allocation in this
+		 * function that may reclaim: reclaiming from the write path
+		 * can recurse back into it through this same device.
+		 */
 		handle = zs_malloc(zram->mem_pool, comp_len,
-				GFP_NOIO | __GFP_HIGHMEM |
+				__GFP_KSWAPD_RECLAIM | __GFP_HIGHMEM |
 				__GFP_MOVABLE | __GFP_CMA |
 				__GFP_OFFLINABLE); // NOTE: __GFP_OFFLINABLE only for QCOM 5.4 kernel
 		if (handle)

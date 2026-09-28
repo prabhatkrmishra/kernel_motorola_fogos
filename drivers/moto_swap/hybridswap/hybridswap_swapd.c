@@ -495,6 +495,7 @@ void update_swapd_mcg_setup(struct mem_cgroup *memcg)
 static int update_swapd_mcgs_setup(char *buf)
 {
 	const char delim[] = " ";
+	struct swapd_param parsed[SWAPD_MAX_LEVEL_NUM];
 	char *token = NULL;
 	int level_num;
 	int i;
@@ -511,48 +512,65 @@ static int update_swapd_mcgs_setup(char *buf)
 	if (level_num > SWAPD_MAX_LEVEL_NUM || level_num < 0)
 		return -EINVAL;
 
+	/*
+	 * Parsed into a local, not into zswap_param.  The previous version
+	 * wrote each field straight into the live global as it validated
+	 * it, so a bad token partway through the list left everything
+	 * before it applied and everything after it untouched, then
+	 * returned an error as though nothing had changed.  A rejected
+	 * write has to leave the live parameters exactly as they were.
+	 *
+	 * Only the levels this write names are committed.  Levels past
+	 * level_num keep their existing values, which is what the previous
+	 * code did implicitly by never writing them;
+	 * update_swapd_memcg_hybs() walks all SWAPD_MAX_LEVEL_NUM entries
+	 * regardless of level_num, so zeroing the tail would silently stop
+	 * a longer previously-configured list from matching anything.
+	 */
+
 	mutex_lock(&reclaim_para_lock);
 	for (i = 0; i < level_num; ++i) {
 		token = strsep(&buf, delim);
 		if (!token)
 			goto out;
 
-		if (kstrtoint(token, 0, &zswap_param[i].min_grade) ||
-				zswap_param[i].min_grade > MAX_APP_GRADE)
+		if (kstrtoint(token, 0, &parsed[i].min_grade) ||
+				parsed[i].min_grade > MAX_APP_GRADE)
 			goto out;
 
 		token = strsep(&buf, delim);
 		if (!token)
 			goto out;
 
-		if (kstrtoint(token, 0, &zswap_param[i].max_grade) ||
-				zswap_param[i].max_grade > MAX_APP_GRADE)
+		if (kstrtoint(token, 0, &parsed[i].max_grade) ||
+				parsed[i].max_grade > MAX_APP_GRADE)
 			goto out;
 
 		token = strsep(&buf, delim);
 		if (!token)
 			goto out;
 
-		if (kstrtoint(token, 0, &zswap_param[i].mem2zram_scale) ||
-				zswap_param[i].mem2zram_scale > MAX_RATIO)
+		if (kstrtoint(token, 0, &parsed[i].mem2zram_scale) ||
+				parsed[i].mem2zram_scale > MAX_RATIO)
 			goto out;
 
 		token = strsep(&buf, delim);
 		if (!token)
 			goto out;
 
-		if (kstrtoint(token, 0, &zswap_param[i].zram2ufs_scale) ||
-				zswap_param[i].zram2ufs_scale > MAX_RATIO)
+		if (kstrtoint(token, 0, &parsed[i].zram2ufs_scale) ||
+				parsed[i].zram2ufs_scale > MAX_RATIO)
 			goto out;
 
 		token = strsep(&buf, delim);
 		if (!token)
 			goto out;
 
-		if (kstrtoint(token, 0, &zswap_param[i].pagefault_level))
+		if (kstrtoint(token, 0, &parsed[i].pagefault_level))
 			goto out;
 	}
 
+	memcpy(zswap_param, parsed, level_num * sizeof(parsed[0]));
 	swapd_mcgs_setup_parse(level_num);
 	mutex_unlock(&reclaim_para_lock);
 	return 0;
