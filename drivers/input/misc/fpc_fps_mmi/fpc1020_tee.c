@@ -21,6 +21,9 @@
 #include <linux/regulator/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/notifier.h>
+#include <linux/kref.h>
+#include <linux/list.h>
+#include <linux/mutex.h>
 
 #define RESET_LOW_SLEEP_MIN_US 5000
 #define RESET_LOW_SLEEP_MAX_US (RESET_LOW_SLEEP_MIN_US + 100)
@@ -34,27 +37,128 @@
 #endif
 
 struct FPS_data {
+	struct kref refs;
 	unsigned int enabled;
 	unsigned int state;
 	struct blocking_notifier_head nhead;
-} *fpsData;
+};
 
-struct FPS_data *FPS_init(struct device *dev)
+/*
+ * fpsData used to be devm_kzalloc()'d and published straight into a
+ * file-scope global, which fpc1020_remove() never cleared.  devm
+ * releases the memory as soon as remove returns, but
+ * FPS_register_notifier(), FPS_unregister_notifier() and FPS_notify()
+ * are EXPORT_SYMBOL_GPL and are reached from other drivers - the
+ * synaptics touchscreen calls the first two through weak stubs that
+ * resolve to these - so any of them running across a remove was left
+ * dereferencing freed memory.
+ *
+ * It is now reference counted and kfree()'d by its last holder instead,
+ * so remove can withdraw it from the global but cannot free it while a
+ * caller still holds it.  fpsData is only read or written under
+ * fps_data_lock; the operations themselves run without that lock, since
+ * blocking_notifier_call_chain() sleeps and may re-enter these APIs -
+ * hence a kref rather than a mutex held across the work.  All three
+ * entry points are called from process context (sysfs writes, a
+ * workqueue worker, a remove path) and never from IRQ, so taking the
+ * mutex is always safe.
+ */
+static DEFINE_MUTEX(fps_data_lock);
+static struct FPS_data *fpsData;
+
+static void fps_data_release(struct kref *ref)
 {
-	struct FPS_data *mdata = devm_kzalloc(dev,
-			sizeof(struct FPS_data), GFP_KERNEL);
-	if (mdata) {
-		BLOCKING_INIT_NOTIFIER_HEAD(&mdata->nhead);
-		pr_debug("%s: FPS notifier data structure init-ed\n", __func__);
-	}
+	struct FPS_data *mdata = container_of(ref, struct FPS_data, refs);
+
+	if (mdata->nhead.head)
+		pr_warn("%s: notifier chain still had clients on teardown\n",
+			__func__);
+
+	kfree(mdata);
+}
+
+/*
+ * Take a reference to the published object, or NULL if the sensor is
+ * gone.  The read and the kref_get are both under fps_data_lock, and
+ * fpc1020_fps_data_unpublish() clears the global under the same lock
+ * before dropping the publisher's reference, so there is no window in
+ * which a caller can read a pointer whose last reference is already
+ * gone.
+ */
+static struct FPS_data *fps_data_get(void)
+{
+	struct FPS_data *mdata;
+
+	mutex_lock(&fps_data_lock);
+	mdata = fpsData;
+	if (mdata)
+		kref_get(&mdata->refs);
+	mutex_unlock(&fps_data_lock);
+
 	return mdata;
+}
+
+static void fps_data_put(struct FPS_data *mdata)
+{
+	if (mdata)
+		kref_put(&mdata->refs, fps_data_release);
+}
+
+/*
+ * Refuses a second instance rather than replacing the published
+ * pointer, so a re-probe cannot leave an older object reachable
+ * through the global while a newer one is in use.
+ */
+static int FPS_init(struct device *dev)
+{
+	struct FPS_data *mdata;
+	int rc = 0;
+
+	mdata = kzalloc(sizeof(*mdata), GFP_KERNEL);
+	if (!mdata)
+		return -ENOMEM;
+
+	BLOCKING_INIT_NOTIFIER_HEAD(&mdata->nhead);
+	kref_init(&mdata->refs);
+
+	mutex_lock(&fps_data_lock);
+	if (fpsData) {
+		mutex_unlock(&fps_data_lock);
+		pr_err("%s: FPS data already published, refusing a second instance\n",
+			__func__);
+		kfree(mdata);
+		return -EBUSY;
+	}
+	fpsData = mdata;
+	mutex_unlock(&fps_data_lock);
+
+	pr_debug("%s: FPS notifier data structure init-ed\n", __func__);
+	return rc;
+}
+
+static void fpc1020_fps_data_unpublish(void)
+{
+	struct FPS_data *mdata;
+
+	mutex_lock(&fps_data_lock);
+	mdata = fpsData;
+	fpsData = NULL;
+	mutex_unlock(&fps_data_lock);
+
+	/*
+	 * Outside the lock: the object may still be alive because a
+	 * caller took a reference before we withdrew it, and freeing it
+	 * must not be able to block a concurrent fps_data_get().
+	 */
+	if (mdata)
+		kref_put(&mdata->refs, fps_data_release);
 }
 
 int FPS_register_notifier(struct notifier_block *nb,
 	unsigned long stype, bool report)
 {
 	int error;
-	struct FPS_data *mdata = fpsData;
+	struct FPS_data *mdata = fps_data_get();
 
 	if (!mdata)
 		return -ENODEV;
@@ -70,6 +174,7 @@ int FPS_register_notifier(struct notifier_block *nb,
 				stype, (void *)&state);
 		pr_debug("%s: FPS reported state %d\n", __func__, state);
 	}
+	fps_data_put(mdata);
 	return error;
 }
 EXPORT_SYMBOL_GPL(FPS_register_notifier);
@@ -78,7 +183,7 @@ int FPS_unregister_notifier(struct notifier_block *nb,
 		unsigned long stype)
 {
 	int error;
-	struct FPS_data *mdata = fpsData;
+	struct FPS_data *mdata = fps_data_get();
 
 	if (!mdata)
 		return -ENODEV;
@@ -91,13 +196,14 @@ int FPS_unregister_notifier(struct notifier_block *nb,
 		pr_info("%s: FPS sensor %lu no clients\n", __func__, stype);
 	}
 
+	fps_data_put(mdata);
 	return error;
 }
 EXPORT_SYMBOL_GPL(FPS_unregister_notifier);
 
 void FPS_notify(unsigned long stype, int state)
 {
-	struct FPS_data *mdata = fpsData;
+	struct FPS_data *mdata = fps_data_get();
 
 	pr_debug("%s: Enter", __func__);
 
@@ -106,6 +212,7 @@ void FPS_notify(unsigned long stype, int state)
 		return;
 	} else if (!mdata->enabled) {
 		pr_debug("%s: !mdata->enabled", __func__);
+		fps_data_put(mdata);
 		return;
 	}
 
@@ -119,6 +226,8 @@ void FPS_notify(unsigned long stype, int state)
 		pr_debug("%s: FPS notification sent\n", __func__);
 	} else
 		pr_warn("%s: mdata->state==state", __func__);
+
+	fps_data_put(mdata);
 }
 
 struct fpc1020_data {
@@ -440,7 +549,11 @@ static int fpc1020_probe(struct platform_device *pdev)
             fpc_pinctrl_on(dev);
 	}
   #endif
-	fpsData = FPS_init(dev);
+	rc = FPS_init(dev);
+	if (rc) {
+		dev_err(dev, "FPS notifier init failed: %d\n", rc);
+		goto exit;
+	}
 
 	fpc1020->dev = dev;
 	dev_set_drvdata(dev, fpc1020);
@@ -579,6 +692,14 @@ err_pwr:
 static int fpc1020_remove(struct platform_device *pdev)
 {
 	struct  fpc1020_data *fpc1020 = dev_get_drvdata(&pdev->dev);
+
+	/*
+	 * Withdraw the notifier object first, before anything else is
+	 * torn down and before devm releases fpc1020.  This does not free
+	 * it if a caller already holds a reference; it only stops new
+	 * ones appearing, so the last holder frees it.
+	 */
+	fpc1020_fps_data_unpublish();
 
 	disable_irq(gpio_to_irq(fpc1020->irq_gpio));
 #ifdef CONFIG_INPUT_MISC_FPC1020_SAVE_TO_CLASS_DEVICE
