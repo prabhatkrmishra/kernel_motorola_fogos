@@ -743,12 +743,21 @@ static void hybridswap_iostatus_bytes(struct hybridswap_io_req *req)
 		return;
 
 	if (req->io_para.class == HYB_RECLAIM_IN) {
-		atomic64_add(req->page_cnt * PAGE_SIZE, &stat->reclaimin_bytes);
-		atomic64_add(req->page_cnt * PAGE_SIZE, &stat->reclaimin_bytes_daily);
+		/*
+		 * page_cnt is an int and PAGE_SIZE is an int, so the product
+		 * is evaluated in 32-bit and only widened here, at the point
+		 * it is already too late.  A single request accumulating
+		 * 2^21 pages - 8 GiB of 4 KiB pages - wraps before the
+		 * atomic64_add ever sees it, and hybridswap_submit_bio()
+		 * sums segment counts with no saturation. Widen the
+		 * multiplier instead.
+		 */
+		atomic64_add((u64)req->page_cnt * PAGE_SIZE, &stat->reclaimin_bytes);
+		atomic64_add((u64)req->page_cnt * PAGE_SIZE, &stat->reclaimin_bytes_daily);
 		atomic64_add(atomic64_read(&req->real_load), &stat->reclaimin_real_load);
 		atomic64_inc(&stat->reclaimin_cnt);
 	} else {
-		atomic64_add(req->page_cnt * PAGE_SIZE, &stat->batchout_bytes);
+		atomic64_add((u64)req->page_cnt * PAGE_SIZE, &stat->batchout_bytes);
 		atomic64_inc(&stat->batchout_cnt);
 	}
 }
