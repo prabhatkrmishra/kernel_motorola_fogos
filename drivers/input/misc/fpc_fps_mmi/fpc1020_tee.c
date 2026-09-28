@@ -472,6 +472,19 @@ static int fpc1020_request_named_gpio(struct fpc1020_data *fpc1020,
 	int rc;
 
 	*gpio = of_get_named_gpio(np, label, 0);
+	/*
+	 * of_find_gpiochip_by_xlate() reports a chip that has not been
+	 * registered yet as -EPROBE_DEFER, and of_get_named_gpio()
+	 * propagates it.  That is a "try again later", not a bad
+	 * property, so it has to reach the caller unchanged or the driver
+	 * binds once against a controller that was not ready and never
+	 * retries.  Every other negative is a genuine problem and keeps
+	 * the existing -EINVAL.
+	 */
+	if (*gpio == -EPROBE_DEFER) {
+		dev_info(dev, "gpio %s not ready, deferring probe\n", label);
+		return -EPROBE_DEFER;
+	}
 	if (!gpio_is_valid(*gpio)) {
 		dev_err(dev, "gpio %s is invalid\n", label);
 		return -EINVAL;
@@ -566,6 +579,13 @@ static int fpc1020_probe(struct platform_device *pdev)
 		goto exit;
 	}
 	fpc1020->pwr_gpio = of_get_named_gpio(np, "fp-gpio-ven", 0);
+	if (fpc1020->pwr_gpio == -EPROBE_DEFER) {
+		/* Controller not registered yet; retry rather than fall
+		 * back, or the sensor is wired with no power control. */
+		pr_info("pwr gpio not ready, deferring probe\n");
+		rc = -EPROBE_DEFER;
+		goto exit;
+	}
 	if (fpc1020->pwr_gpio < 0) {
 		pr_warn("failed to get pwr gpio!\n");
 		fpc1020->pwr_gpio = -1;
@@ -611,9 +631,14 @@ static int fpc1020_probe(struct platform_device *pdev)
 
 	rc = fpc1020_request_named_gpio(fpc1020, "irq",
 			&fpc1020->irq_gpio);
-	gpio_direction_input(fpc1020->irq_gpio);
 	if (rc)
 		goto exit;
+	/*
+	 * After the check, not before: on failure irq_gpio still holds a
+	 * negative errno, and gpio_direction_input() on one of those only
+	 * logs "invalid GPIO desc" and returns an error nobody reads.
+	 */
+	gpio_direction_input(fpc1020->irq_gpio);
 
 	rc = fpc1020_request_named_gpio(fpc1020, "rst",
 			&fpc1020->rst_gpio);
