@@ -25,6 +25,7 @@
 #include <linux/genhd.h>
 #include <linux/highmem.h>
 #include <linux/slab.h>
+#include <linux/lockdep.h>
 #include <linux/swap.h>
 #include <linux/backing-dev.h>
 #include <linux/string.h>
@@ -1907,6 +1908,14 @@ static void zram_reset_device_locked(struct zram *zram)
 {
 	struct zcomp *comp;
 	u64 disksize;
+
+	/*
+	 * The contract this split exists to enforce, now checked rather
+	 * than only described: both callers take init_lock for write
+	 * before getting here, because the rwsem is not recursive and
+	 * taking it again would self-deadlock.
+	 */
+	lockdep_assert_held(&zram->init_lock);
 
 	zram->limit_pages = 0;
 

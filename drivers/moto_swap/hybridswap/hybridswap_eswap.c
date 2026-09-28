@@ -19,6 +19,7 @@
 #endif
 #include <linux/version.h>
 #include <linux/wait_bit.h>
+#include <linux/lockdep.h>
 
 #ifdef CONFIG_ZRAM_5_4
 #include "../zram-5.4/zram_drv.h"
@@ -4591,6 +4592,16 @@ void hybridswap_global_setting_deinit(void)
 bool hybridswap_zram_bound(struct zram *zram)
 {
 	bool bound;
+
+	/*
+	 * Every caller takes init_lock for write before asking, because the
+	 * answer is only meaningful against a device that cannot be torn
+	 * down underneath it: zram_remove() and zram_reset_device() both
+	 * reach this from inside their own bound check.  Stated here so a
+	 * future caller that forgets trips over it instead of quietly
+	 * reading a racy answer.
+	 */
+	lockdep_assert_held(&zram->init_lock);
 
 	mutex_lock(&hybridswap_enable_lock);
 	bound = (global_settings.zram == zram) ||
