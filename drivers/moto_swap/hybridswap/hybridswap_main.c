@@ -150,18 +150,27 @@ ssize_t hybridswap_vmstat_show(struct device *dev,
 		return -ENOMEM;
 	all_hybridswap_vm_events(vm_buf);
 
+	/*
+	 * scnprintf() reports what it actually wrote instead of what it
+	 * would have written, so len can never be pushed past buf.  The loop
+	 * checks the bound before each call, and the two fixed-name entries
+	 * ahead of it are bounded by their own short format strings.
+	 */
 #ifdef CONFIG_HYBRIDSWAP_SWAPD
-	len += snprintf(buf + len, PAGE_SIZE - len, "%-32s %12lu\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "%-32s %12lu\n",
 			"page_fault_pause", atomic_long_read(&page_fault_pause));
-	len += snprintf(buf + len, PAGE_SIZE - len, "%-32s %12lu\n",
+	len += scnprintf(buf + len, PAGE_SIZE - len, "%-32s %12lu\n",
 			"page_fault_pause_cnt", atomic_long_read(&page_fault_pause_cnt));
 #endif
 
-	for (;i < NR_EVENT_ITEMS; i++) {
-		len += snprintf(buf + len, PAGE_SIZE - len, "%-32s %12lu\n",
+	for (; i < NR_EVENT_ITEMS && len < PAGE_SIZE; i++) {
+		int n;
+
+		n = scnprintf(buf + len, PAGE_SIZE - len, "%-32s %12lu\n",
 				swapd_text[i], vm_buf[i]);
-		if (len >= PAGE_SIZE)
+		if (n <= 0)
 			break;
+		len += n;
 	}
 	kfree(vm_buf);
 
@@ -998,9 +1007,21 @@ static struct cftype *hybridswap_dup_dfl_cftypes(const struct cftype *src)
 	 * registration.  The copy must not inherit that bit, or
 	 * cgroup_addrm_files() would skip every entry on the default
 	 * hierarchy and no files would ever be created.
+	 *
+	 * kmemdup() also carries over the bookkeeping cgroup_init_cftypes()
+	 * stamped on the source when it was registered (cft->ss and
+	 * cft->kf_ops).  Those are the core's own, per-table state and are
+	 * re-initialised by the re-registration below, which WARN_ON()s on
+	 * any entry that arrives with either already set, so hand the copy
+	 * back with them cleared.  cft->node needs no such care: the
+	 * list_add_tail() in cgroup_add_cftypes() overwrites both list
+	 * pointers before anything can walk the stale ones.
 	 */
-	for (cft = dst; cft->name[0]; cft++)
+	for (cft = dst; cft->name[0]; cft++) {
 		cft->flags &= ~__CFTYPE_NOT_ON_DFL;
+		cft->ss = NULL;
+		cft->kf_ops = NULL;
+	}
 
 	return dst;
 }

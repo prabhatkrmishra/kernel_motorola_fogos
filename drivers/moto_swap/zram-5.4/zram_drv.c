@@ -73,8 +73,18 @@ static void zram_free_page(struct zram *zram, size_t index);
 static void zram_wait_slot_inflight(struct zram *zram, u32 index)
 {
 	unsigned long *flagsp = &zram->table[index].flags;
-	const unsigned long inflight = BIT(ZRAM_UNDER_WB) | BIT(ZRAM_BATCHING_OUT);
+	unsigned long inflight = BIT(ZRAM_UNDER_WB);
 	int retries = 0;
+
+	/*
+	 * ZRAM_BATCHING_OUT only exists in a hybridswap build, and only
+	 * hybridswap_page_fault_exit_check() - on the exit path of
+	 * hybridswap_page_fault() - ever clears it, so without
+	 * CONFIG_HYBRIDSWAP_CORE there is no fault-out fetch to wait for.
+	 */
+#ifdef CONFIG_HYBRIDSWAP_CORE
+	inflight |= BIT(ZRAM_BATCHING_OUT);
+#endif
 
 	zram_slot_lock(zram, index);
 	while (*flagsp & inflight) {

@@ -74,6 +74,8 @@ struct hybridswapd_task {
 #define SWAPD_SHRINK_SIZE_PER_WINDOW 1024
 #define PAGES_TO_MB(pages) ((pages) >> 8)
 #define PAGES_PER_1MB (1 << 8)
+/* zram_critical_threshold is in MB, zram_crit_thres counts pages */
+#define ZRAM_CRIT_THRES_SHIFT (20 - PAGE_SHIFT)
 
 unsigned long long total_pagefault_percent;
 atomic64_t zram_wm_scale = ATOMIC64_INIT(ZRAM_WM_RATIO);
@@ -383,10 +385,15 @@ static s64 pagefault_refresh_min_read(
 static int zram_critical_thres_write(struct cgroup_subsys_state *css,
 		struct cftype *cft, s64 val)
 {
-	if (val < 0)
+	/*
+	 * The value arrives in MB and is stored in pages, so it has to be
+	 * shifted up; the shift runs on s64, so refuse anything the shift
+	 * itself could overflow.
+	 */
+	if (val < 0 || val > (S64_MAX >> ZRAM_CRIT_THRES_SHIFT))
 		return -EINVAL;
 
-	atomic64_set(&zram_crit_thres, val << (20 - PAGE_SHIFT));
+	atomic64_set(&zram_crit_thres, val << ZRAM_CRIT_THRES_SHIFT);
 
 	return 0;
 }
@@ -394,7 +401,7 @@ static int zram_critical_thres_write(struct cgroup_subsys_state *css,
 static s64 zram_critical_thres_read(struct cgroup_subsys_state *css,
 		struct cftype *cft)
 {
-	return atomic64_read(&zram_crit_thres) >> (20 - PAGE_SHIFT);
+	return atomic64_read(&zram_crit_thres) >> ZRAM_CRIT_THRES_SHIFT;
 }
 
 static s64 cpuload_level_read(struct cgroup_subsys_state *css,
@@ -1348,22 +1355,6 @@ static bool zram_need_swapout(void)
 
 	hybp(HYB_DEBUG, "zram_wm_ok %d avail_buffer_wm_ok %d ufs_wm_ok %d\n",
 			zram_wm_ok, avail_buffer_wm_ok, ufs_wm_ok);
-
-	return false;
-}
-
-bool zram_watermark_exceed(void)
-{
-	u64 nr_zram_used;
-	u64 nr_wm = fetch_zram_critical_level_value();
-
-	if (!nr_wm)
-		return false;
-
-	nr_zram_used = hybridswap_fetch_zram_used_pages();
-
-	if (nr_zram_used > nr_wm)
-		return true;
 
 	return false;
 }
