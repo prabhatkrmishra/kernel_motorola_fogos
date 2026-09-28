@@ -5136,17 +5136,29 @@ out:
 	hyb_info_put(infos);
 }
 
-void hybridswap_untrack(struct zram *zram, u32 index)
+/*
+ * Drop @index out of the hybridswap tables.  Returns false only when the
+ * wait gave up with a completer still holding the slot, in which case the
+ * list entry is deliberately left alone: hybridswap_swap_sorted_list_del()
+ * would clear ZRAM_WB (destroying the swap maps and zeroing the handle)
+ * for a slot the completer is still writing, and the caller has just
+ * decided to free that slot.  Skipping the delete leaks the list entry
+ * and its accounting, which is the lesser harm.  True means the caller
+ * may carry on as if the slot were never tracked.
+ *
+ * The slot lock is held across the call, and on both returns.
+ */
+bool hybridswap_untrack(struct zram *zram, u32 index)
 {
 	struct hyb_info *infos;
 	int retries;
 
 	if (!hybridswap_core_enabled())
-		return;
+		return true;
 
 	infos = hyb_info_get(zram);
 	if (!infos)
-		return;
+		return true;
 
 	/*
 	 * Wait out in-flight eswap operations claiming this slot; they
@@ -5169,12 +5181,14 @@ void hybridswap_untrack(struct zram *zram, u32 index)
 		if (++retries >= 2) {
 			/* Completer is stuck or gone; degrade loudly. */
 			WARN_ON_ONCE(1);
-			break;
+			hyb_info_put(infos);
+			return false;
 		}
 	}
 
 	hybridswap_swap_sorted_list_del(zram, index);
 	hyb_info_put(infos);
+	return true;
 }
 
 static unsigned long memcg_reclaim_size(struct mem_cgroup *memcg)

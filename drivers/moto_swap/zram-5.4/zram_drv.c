@@ -59,7 +59,7 @@ static size_t huge_class_size;
 
 static const struct block_device_operations zram_devops;
 
-static void zram_free_page(struct zram *zram, size_t index);
+static bool zram_free_page(struct zram *zram, size_t index);
 
 /*
  * Sleep until no eswap operation claims @index, returning with the slot
@@ -69,8 +69,15 @@ static void zram_free_page(struct zram *zram, size_t index);
  * got stored last and corrupt the operation's accounting.  The wait can
  * span a full eswap IO, so sleep on the slot's flags instead of spinning;
  * wakers live at every site that clears either flag.
+ *
+ * Returns false only when the wait gave up with the inflight bits still
+ * set, i.e. the completer is stuck or gone.  That is a real signal, so
+ * it is reported as a WARN_ON_ONCE, and the caller must NOT free or
+ * overwrite the slot: it would race the very writer this wait exists to
+ * exclude.  On false the slot lock is still held, exactly as on the
+ * quiesced return, so callers unlock either way.
  */
-static void zram_wait_slot_inflight(struct zram *zram, u32 index)
+static bool zram_wait_slot_inflight(struct zram *zram, u32 index)
 {
 	unsigned long *flagsp = &zram->table[index].flags;
 	unsigned long inflight = BIT(ZRAM_UNDER_WB);
@@ -97,9 +104,11 @@ static void zram_wait_slot_inflight(struct zram *zram, u32 index)
 		if (++retries >= 2) {
 			/* Completer is stuck or gone; degrade loudly. */
 			WARN_ON_ONCE(1);
-			break;
+			return false;
 		}
 	}
+
+	return true;
 }
 
 static int zram_bvec_read(struct zram *zram, struct bio_vec *bvec,
@@ -728,7 +737,25 @@ static ssize_t writeback_store(struct device *dev,
 			goto next;
 		}
 
-		zram_free_page(zram, index);
+		/*
+		 * Give up on this index if the free was refused, undoing
+		 * only the two flags this loop set on it and skipping the
+		 * ZRAM_WB install below - installing over a slot whose
+		 * hybridswap bookkeeping was deliberately left in place is
+		 * exactly the corruption the refusal exists to prevent.
+		 * blk_idx is still set here, so the common tail returns
+		 * the backing block to the pool; nothing is leaked.
+		 *
+		 * CONFIG_HYBRIDSWAP_CORE cannot be set in this build
+		 * (HYBRIDSWAP depends on !HYBRIDSWAP_ZRAM_WRITEBACK), so
+		 * this cannot actually fire today; the check is here so
+		 * that stays true if that dependency ever changes.
+		 */
+		if (!zram_free_page(zram, index)) {
+			zram_clear_flag(zram, index, ZRAM_UNDER_WB);
+			zram_clear_flag(zram, index, ZRAM_IDLE);
+			goto next;
+		}
 		zram_clear_flag(zram, index, ZRAM_UNDER_WB);
 		zram_set_flag(zram, index, ZRAM_WB);
 		zram_set_element(zram, index, blk_idx);
@@ -1140,8 +1167,45 @@ static void zram_meta_free(struct zram *zram, u64 disksize)
 
 	/* Free all pages that are still in this zram device */
 	for (index = 0; index < num_pages; index++) {
-		zram_wait_slot_inflight(zram, index);
-		zram_free_page(zram, index);
+		if (!zram_wait_slot_inflight(zram, index)) {
+			/*
+			 * A fault-out fetch or a shrink writeback still owns
+			 * this slot.  There is no refcount here to wait on,
+			 * so the sweep cannot simply be resumed later: the
+			 * zs_destroy_pool()/vfree() below would pull the pool
+			 * and the table out from under that completer, and
+			 * stopping the sweep would do the same to every slot
+			 * it has not reached yet.  Abandon it instead.
+			 *
+			 * The table and the pool are then orphaned, not
+			 * merely left allocated: the caller has already
+			 * zeroed zram->disksize, so init_done() is false and
+			 * the next disksize write allocates fresh ones over
+			 * the top, dropping the old pool and every page left
+			 * in it.  Keeping that memory would take a deferred
+			 * teardown, which is out of scope here; leaking it
+			 * beats the use-after-free, and the WARN_ON_ONCE above
+			 * is what reports the stuck completer that got us
+			 * here.
+			 */
+			zram_slot_unlock(zram, index);
+			pr_err("meta free aborted at index %zu: busy slot\n",
+					index);
+			return;
+		}
+		/*
+		 * The wait above already drained both inflight bits that
+		 * hybridswap_untrack() waits on, so it cannot give up again
+		 * here.  A false return would mean the tables went out from
+		 * under this sweep, the same unrecoverable state as above,
+		 * so stop rather than walk on.
+		 */
+		if (!zram_free_page(zram, index)) {
+			zram_slot_unlock(zram, index);
+			pr_err("meta free aborted at %zu: untracked slot\n",
+					index);
+			return;
+		}
 		zram_slot_unlock(zram, index);
 	}
 
@@ -1173,10 +1237,27 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
  * To protect concurrent access to the same index entry,
  * caller should hold this table index entry's bit_spinlock to
  * indicate this index entry is accessing.
+ *
+ * Returns false if the hybridswap bookkeeping for this slot had to be
+ * left in place because a completer still owns it; the slot itself is
+ * not freed in that case, so nothing observes the inconsistency, but
+ * the caller must not go on to reuse or re-derive the slot's state.
  */
-static void zram_free_page(struct zram *zram, size_t index)
+static bool zram_free_page(struct zram *zram, size_t index)
 {
 	unsigned long handle;
+
+#ifdef CONFIG_HYBRIDSWAP_CORE
+	/*
+	 * First, before any mutation: on a false return the slot must be
+	 * left exactly as found, so the hybridswap bookkeeping is the
+	 * one thing that gets to veto before the ac_time / ZRAM_IDLE /
+	 * ZRAM_HUGE updates below have already half-committed to a free
+	 * that is not going to happen.
+	 */
+	if (!hybridswap_untrack(zram, index))
+		return false;
+#endif
 
 #ifdef CONFIG_HYBRIDSWAP_ZRAM_MEMORY_TRACKING
 	zram->table[index].ac_time = 0;
@@ -1188,10 +1269,6 @@ static void zram_free_page(struct zram *zram, size_t index)
 		zram_clear_flag(zram, index, ZRAM_HUGE);
 		atomic64_dec(&zram->stats.huge_pages);
 	}
-
-#ifdef CONFIG_HYBRIDSWAP_CORE
-	hybridswap_untrack(zram, index);
-#endif
 
 	if (zram_test_flag(zram, index, ZRAM_WB)) {
 		zram_clear_flag(zram, index, ZRAM_WB);
@@ -1213,7 +1290,7 @@ static void zram_free_page(struct zram *zram, size_t index)
 
 	handle = zram_get_handle(zram, index);
 	if (!handle)
-		return;
+		return true;
 
 	zs_free(zram->mem_pool, handle);
 
@@ -1226,6 +1303,7 @@ out:
 	zram_set_obj_size(zram, index, 0);
 	WARN_ON_ONCE(zram->table[index].flags &
 		~(1UL << ZRAM_LOCK | 1UL << ZRAM_UNDER_WB));
+	return true;
 }
 
 
@@ -1435,8 +1513,33 @@ out:
 	 * Free memory associated with this sector
 	 * before overwriting unused sectors.
 	 */
-	zram_wait_slot_inflight(zram, index);
-	zram_free_page(zram, index);
+	if (!zram_wait_slot_inflight(zram, index)) {
+		/*
+		 * A fault-out fetch or a shrink writeback still owns the
+		 * slot.  Installing our handle here would overwrite the
+		 * page that fetch is about to hand to the reader, and the
+		 * fetch's own accounting (its stored/notify counters) would
+		 * never be reconciled, so leave the slot entirely alone.
+		 * The WARN_ON_ONCE above already fired.  -EAGAIN names the
+		 * cause - transient, not a bad page - and surfaces as a
+		 * failed write (bio_io_error() turns it into BLK_STS_IOERR)
+		 * with the old contents left in the slot for whoever owns
+		 * it, which is strictly better than corrupting them.
+		 *
+		 * Undoing our own bookkeeping is common to both refusals
+		 * here, so it happens once in out_undo below.
+		 */
+		goto out_undo;
+	}
+
+	/*
+	 * The wait above drained the very bits hybridswap_untrack()
+	 * waits on, so it cannot give up here; the WARN_ON_ONCE is
+	 * there to say so if that ever stops being true.  Bail rather
+	 * than installing into a slot someone else still owns.
+	 */
+	if (WARN_ON_ONCE(!zram_free_page(zram, index)))
+		goto out_undo;
 
 	if (comp_len == PAGE_SIZE) {
 		zram_set_flag(zram, index, ZRAM_HUGE);
@@ -1459,6 +1562,28 @@ out:
 	/* Update stats */
 	atomic64_inc(&zram->stats.pages_stored);
 	return ret;
+
+out_undo:
+	/*
+	 * Give back everything this write charged for work it never
+	 * installed.  The object and its compr_data_size charge exist only
+	 * on the compression path, which is why the handle test is the
+	 * guard; the ZRAM_SAME path allocates nothing but did charge
+	 * same_pages above, and zram_free_page()'s ZRAM_SAME branch -
+	 * the only place that decrements it - is unreachable here
+	 * precisely because the slot's ZRAM_SAME flag was never set.
+	 * flags is set to ZRAM_SAME on that path and nowhere else, so it
+	 * distinguishes the two exactly and the compression path cannot
+	 * be charged for a same page.
+	 */
+	if (handle) {
+		zs_free(zram->mem_pool, handle);
+		atomic64_sub(comp_len, &zram->stats.compr_data_size);
+	}
+	if (flags)
+		atomic64_dec(&zram->stats.same_pages);
+	zram_slot_unlock(zram, index);
+	return -EAGAIN;
 }
 
 static int zram_bvec_write(struct zram *zram, struct bio_vec *bvec,
@@ -1532,9 +1657,20 @@ static void zram_bio_discard(struct zram *zram, u32 index,
 
 	while (n >= PAGE_SIZE) {
 		zram_slot_lock(zram, index);
-		zram_free_page(zram, index);
+		/*
+		 * No inflight gate above this point, so a false return is
+		 * reachable here: an eswap completer still owns the slot.
+		 * Discarding it anyway would free the object that completer
+		 * is about to hand to the reader and tear down the swap maps
+		 * it is mid-way through installing, so leave the slot
+		 * exactly as found and report the discard as not done.
+		 * The bio still completes with success - a discard that is
+		 * silently skipped is recoverable, one that corrupts a
+		 * live fetch is not.
+		 */
+		if (zram_free_page(zram, index))
+			atomic64_inc(&zram->stats.notify_free);
 		zram_slot_unlock(zram, index);
-		atomic64_inc(&zram->stats.notify_free);
 		index++;
 		n -= PAGE_SIZE;
 	}
@@ -1667,7 +1803,15 @@ static void zram_slot_free_notify(struct block_device *bdev,
 		return;
 	}
 #endif
-	zram_free_page(zram, index);
+	/*
+	 * hybridswap_delete() above already refused this slot if a
+	 * completer claimed it, so a false return here would mean the
+	 * claim landed between the two checks.  Leave the slot as found
+	 * and count it as a miss: freeing is this function's only job and
+	 * there is nothing safe left for it to do instead.
+	 */
+	if (!zram_free_page(zram, index))
+		atomic64_inc(&zram->stats.miss_free);
 	zram_slot_unlock(zram, index);
 }
 

@@ -19,7 +19,7 @@ extern ssize_t hybridswap_enable_show(struct device *dev,
 		struct device_attribute *attr, char *buf);
 #ifdef CONFIG_HYBRIDSWAP_CORE
 extern void hybridswap_record(struct zram *zram, u32 index, struct mem_cgroup *memcg);
-extern void hybridswap_untrack(struct zram *zram, u32 index);
+extern bool hybridswap_untrack(struct zram *zram, u32 index);
 /*
  * Declared here rather than in hybridswap_internal.h: zram_drv.c includes
  * this header and cannot include the internal one (it defines a file scope
