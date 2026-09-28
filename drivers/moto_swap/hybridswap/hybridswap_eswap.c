@@ -74,6 +74,14 @@ struct zs_eswap_para {
 struct hybridswap_cfg {
 	atomic_t enable;
 	atomic_t out_to_eswap_enable;
+	/*
+	 * Bumped every time the swap map is replaced.  A reclaim work item
+	 * records the value current when it was queued and the worker
+	 * refuses to run if it no longer matches, which is what stops a
+	 * straggler queued against the old map from looking its eswapid up
+	 * in the new one.  See hybridswap_reclaim_work().
+	 */
+	atomic_t reclaim_gen;
 	struct hybstatus *stat;
 	struct workqueue_struct *reclaim_wq;
 	struct zram *zram;
@@ -87,6 +95,8 @@ struct async_req {
 	unsigned long size;
 	unsigned long out_size;
 	unsigned long reclaimined_sz;
+	/* swap-map generation this work was queued against */
+	u32 gen;
 	struct work_struct work;
 	int nice;
 	bool preload;
@@ -2522,8 +2532,14 @@ void hybridswap_manager_deinit(struct zram *zram)
 	}
 }
 
+void hybridswap_set_out_to_eswap_enable(bool en);
+
 int hybridswap_manager_init(struct zram *zram)
 {
+	/* The !zram path below reaches out: before any of the transition
+	 * runs, so it has to start false or that path would resume a
+	 * submission that was never suspended. */
+	bool was_enabled = false;
 	int ret;
 	struct hyb_info *old;
 
@@ -2563,6 +2579,49 @@ int hybridswap_manager_init(struct zram *zram)
 	    old->nr_es == (int)((zram->nr_pages << PAGE_SHIFT) >> ESWAP_SHIFT))
 		return 0;
 
+	/*
+	 * Geometry replacement, made atomic with respect to reclaim.
+	 * Ordering, and why each step sits where it does:
+	 *
+	 *  1. Suspend submission.  hybridswap_out_to_eswap() gates on
+	 *     out_to_eswap_enable, so nothing new enters while the table
+	 *     is swapped.  Suspend before the drain, not after, or work
+	 *     submitted during the drain would still be pending at the
+	 *     detach below.
+	 *
+	 *  2. Drain.  Everything already queued runs to completion here,
+	 *     still against the old table; flush_workqueue() does not
+	 *     return until it has.
+	 *
+	 *  3. Bump the generation.  This is what closes the window the
+	 *     drain cannot: a submitter that read out_to_eswap_enable
+	 *     before step 1 and calls queue_work() after step 2 still
+	 *     gets its work run, and it would carry the old generation.
+	 *     The worker refuses those, so no straggler can resolve a
+	 *     pre-swap eswapid against the new table.  Bumping after the
+	 *     drain rather than before is deliberate - bumping first
+	 *     would make work already inside the drain refuse, leaving
+	 *     that reclaim's accounting undone.
+	 *
+	 *  4. Detach, only now that nothing can still be walking the old
+	 *     table.  RCU-publishes NULL and drops the list's reference.
+	 *     The per-operation hyb_info_get() in the reclaim paths is
+	 *     what keeps a straggler that slipped past step 3 from
+	 *     touching freed memory.
+	 *
+	 *  5. Allocate and publish from the geometry current now, which
+	 *     is the entire point of the exercise.
+	 *
+	 *  6. Resume, only once the new table is visible, so reclaim never
+	 *     runs against a device that is between tables.
+	 */
+	was_enabled = hybridswap_out_to_eswap_enable();
+	if (was_enabled)
+		hybridswap_set_out_to_eswap_enable(false);
+	if (global_settings.reclaim_wq)
+		flush_workqueue(global_settings.reclaim_wq);
+	atomic_inc(&global_settings.reclaim_gen);
+
 	hyb_info_detach(zram);
 	/*
 	 * Publish with release semantics: lockless readers via
@@ -2575,9 +2634,21 @@ int hybridswap_manager_init(struct zram *zram)
 		ret = -ENOMEM;
 		goto out;
 	}
+	if (was_enabled)
+		hybridswap_set_out_to_eswap_enable(true);
 	return 0;
 out:
+	/*
+	 * Deinit first, restore second.  Restoring before the teardown
+	 * would advertise an open submission queue while there is no table
+	 * behind it; restoring after leaves the flag describing the device
+	 * the caller is about to retry, which is what it wants.  Either
+	 * way hybridswap_core_enabled() still gates real submission, so
+	 * the restore cannot start a reclaim by itself.
+	 */
 	hybridswap_manager_deinit(zram);
+	if (was_enabled)
+		hybridswap_set_out_to_eswap_enable(true);
 
 	return ret;
 }
@@ -4828,27 +4899,12 @@ int hybridswap_set_enable_init(bool en)
 	}
 
 	/*
-	 * Drain outstanding reclaim work before manager_init() can detach
-	 * the old table.  Reached only with core disabled - the early
-	 * return above - so no new reclaim is being submitted; what is
-	 * flushed here was queued before the disable.  This is the same
-	 * drain the exit path gets for free from destroy_workqueue(), and
-	 * it is here for the same reason: a reclaim worker walking an
-	 * eswapid against a table being replaced underneath it is walking
-	 * the wrong swap map.
-	 *
-	 * flush_workqueue() cannot close that window by itself - a
-	 * submitter that passed the core_enabled() test in
-	 * hybridswap_out_to_eswap() can still queue after this returns.
-	 * What closes the residual case is the reference each worker now
-	 * takes on entry: a straggler arriving after the detach gets NULL
-	 * from hyb_info_get() and bails without touching the new table.
-	 * The drain is therefore for coherence in the common case and the
-	 * per-operation reference is what makes the leftover case safe -
-	 * neither one alone is complete, which is why both exist.
+	 * No drain here: hybridswap_manager_init() owns the quiesce, because
+	 * the drain is only correct immediately around the detach it guards.
+	 * Draining out here as well would leave the two apart, with a
+	 * submission window open between this drain and the one that
+	 * actually matters.
 	 */
-	if (global_settings.reclaim_wq)
-		flush_workqueue(global_settings.reclaim_wq);
 
 	ret = hybridswap_manager_init(global_settings.zram);
 	if (unlikely(ret)) {
@@ -5770,6 +5826,21 @@ static void hybridswap_reclaim_work(struct work_struct *work)
 	struct async_req *rq = container_of(work, struct async_req, work);
 	int old_nice = task_nice(current);
 
+	/*
+	 * The swap map this work was queued against has been replaced.  Its
+	 * eswapid indexes the old table, so resolving it against the new
+	 * one would act on an unrelated extent - which is why a bare
+	 * hyb_info_get() is not enough here: it would happily hand back
+	 * the new table.  Refuse before touching any table, and before
+	 * shrink_entry() marks anything, so no slot is left behind.
+	 */
+	if (rq->gen != atomic_read(&global_settings.reclaim_gen)) {
+		hybp(HYB_INFO, "stale reclaim dropped, gen %u != %d\n",
+			rq->gen, atomic_read(&global_settings.reclaim_gen));
+		hybridswap_free(rq);
+		return;
+	}
+
 	set_user_nice(current, rq->nice);
 	hybridswap_reclaimin_inc();
 	hybridswap_memcg_iter(hybridswap_permcg_reclaimin, rq);
@@ -5806,6 +5877,37 @@ unsigned long hybridswap_out_to_eswap(unsigned long size)
 	rq->out_size = out_size;
 	rq->reclaimined_sz = 0;
 	rq->nice = task_nice(current);
+	/*
+	 * Stamped at queue time, and this is the invariant the drain in
+	 * hybridswap_manager_init() rests on, so it is worth stating in
+	 * full.
+	 *
+	 * This submitter touches no swap map - no zram->infos, no
+	 * hyb_info_get, no swap_maps, no alloc_eswap.  The eswapid is not
+	 * allocated here at all; it is created inside the worker, by
+	 * hybridswap_eswap_create(), strictly after the generation check
+	 * in hybridswap_reclaim_work().  That is what makes the pair
+	 * coherent: the generation and the eswapid cannot be sampled from
+	 * different tables, because the eswapid does not exist until the
+	 * check has already passed.  Taking a reference here would not
+	 * help - hyb_info_get() would happily return the new table to
+	 * work that was queued against the old one, which is memory-safe
+	 * and logically wrong.
+	 *
+	 * Consequence for the transition: if this thread is preempted
+	 * between the out_to_eswap_enable check above and this queue, and
+	 * a swap-map replacement completes in that window, this work is
+	 * stamped with the NEW generation and runs against the NEW table.
+	 * That is correct rather than a miss - it was never bound to the
+	 * old table, because nothing here ever read it.  Work that really
+	 * does belong to the replaced table was stamped before the bump
+	 * and is refused by the worker.
+	 *
+	 * Reclaim has exactly one queue_work() site; the other in this
+	 * file queues stopio_work on the proc read/write workqueues, which
+	 * is the I/O completion path and carries no swap map.
+	 */
+	rq->gen = atomic_read(&global_settings.reclaim_gen);
 	INIT_WORK(&rq->work, hybridswap_reclaim_work);
 	queue_work(hybridswap_fetch_reclaim_workqueue(), &rq->work);
 
