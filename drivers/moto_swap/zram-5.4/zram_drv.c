@@ -2624,7 +2624,17 @@ static void __exit zram_exit(void)
 	 * there is no matching pre-deinit to call here: reaching this
 	 * function already implies pre_init() succeeded.
 	 */
-#ifdef CONFIG_HYBRIDSWAP
+#if defined(CONFIG_HYBRIDSWAP) && defined(CONFIG_MODULES)
+	/*
+	 * Gated on CONFIG_MODULES because that is the only build in which
+	 * module_exit() can mean anything.  module.h states outright that
+	 * "if the driver is statically compiled into the kernel, module_exit()
+	 * has no effect", and a kernel carrying no module core has no
+	 * exitcall walker either, so in a modules-disabled build this call
+	 * is unreachable in every configuration rather than merely unused.
+	 * Compiling it there would be a teardown that no sequence of events
+	 * can run.
+	 */
 	hybridswap_exit();
 #endif
 	destroy_devices();

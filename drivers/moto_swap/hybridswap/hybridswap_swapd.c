@@ -489,7 +489,21 @@ void update_swapd_mcg_setup(struct mem_cgroup *memcg)
 	if (!hybs)
 		return;
 
+	/*
+	 * zswap_param is written under reclaim_para_lock by
+	 * update_swapd_mcgs_setup().  This read was unlocked, so a config
+	 * write could be caught half applied: the array is five plain
+	 * unsigned ints, not one word, so a reader landing mid-rewrite can
+	 * match one level's min_grade against another's max_grade and
+	 * assign scales from a different level than the one it matched.
+	 *
+	 * Safe to take here.  The only holder is the sysfs writer above,
+	 * and this function's sole caller, memcg_app_grade_update(), takes
+	 * grade_list_lock strictly after we return, so this nests nothing.
+	 */
+	mutex_lock(&reclaim_para_lock);
 	update_swapd_memcg_hybs(hybs);
+	mutex_unlock(&reclaim_para_lock);
 }
 
 static int update_swapd_mcgs_setup(char *buf)
