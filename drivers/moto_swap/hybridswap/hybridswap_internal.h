@@ -412,6 +412,7 @@ int hybridswap_find_eswap_by_index(
 		unsigned long eswpentry, struct hybridswap_buffer *buf, void **private);
 int hybridswap_find_eswap_by_memcg(
 		struct mem_cgroup *mcg,
+		struct hyb_info *infos,
 		struct hybridswap_buffer *dest_buf, void **private);
 void hybridswap_eswap_destroy(void *private, enum hybridswap_class class);
 void hybridswap_eswap_exception(enum hybridswap_class class,

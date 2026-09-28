@@ -2981,7 +2981,25 @@ int hybridswap_find_eswap_by_index(unsigned long eswpentry,
 	return eswapid;
 }
 
+/*
+ * infos comes from the caller, which has already resolved hybs->zram once
+ * and taken a reference with hyb_info_get().  It must be used exactly as
+ * given, and zram is deliberately not passed at all: re-deriving
+ * MEMCGRP_ITEM(mcg, zram) here is unsafe, because hybs->zram is cleared
+ * by the memcg-id release path - mem_cgroup_id_put_many() dropping
+ * memcg->id.ref to zero fires mem_c_group_id_remove_hook(), which is an
+ * ordinary refcount event and not cgroup teardown - and that can land
+ * between the caller's lookup and this call.  The caller's check is a
+ * point-in-time test and alloc_io_eswapent() below sleeps, so the window
+ * is real.  Taking the object rather than a path to it is what closes
+ * that window instead of narrowing it.
+ *
+ * Using the caller's infos also keeps this lookup on the same table the
+ * caller is about to submit against, rather than on whatever the field
+ * happens to name by the time we get here.
+ */
 int hybridswap_find_eswap_by_memcg(struct mem_cgroup *mcg,
+		struct hyb_info *infos,
 		struct hybridswap_buffer *buf,
 		void **private)
 {
@@ -3001,13 +3019,13 @@ int hybridswap_find_eswap_by_memcg(struct mem_cgroup *mcg,
 		return -EINVAL;
 	}
 
-	eswapid = fetch_memcg_eswap(MEMCGRP_ITEM(mcg, zram)->infos, mcg);
+	eswapid = fetch_memcg_eswap(infos, mcg);
 	if (eswapid < 0)
 		return eswapid;
 	io_eswap = alloc_io_eswapent(buf->pool, true, false);
 	if (!io_eswap) {
 		hybp(HYB_ERR, "io_eswap alloc failed\n");
-		put_eswap(MEMCGRP_ITEM(mcg, zram)->infos, eswapid);
+		put_eswap(infos, eswapid);
 		return -ENOMEM;
 	}
 	io_eswap->eswapid = eswapid;
@@ -5916,6 +5934,7 @@ unsigned long hybridswap_out_to_eswap(unsigned long size)
 
 static int hybridswap_batches_eswap(struct io_work_arg *iowork,
 		struct mem_cgroup *mcg,
+		struct hyb_info *infos,
 		bool preload,
 		int *errio)
 {
@@ -5935,7 +5954,7 @@ static int hybridswap_batches_eswap(struct io_work_arg *iowork,
 
 	hybperfiowrkstart(&iowork->record, HYB_FIND_ESWAP);
 	iowork->ioentry->eswapid = hybridswap_find_eswap_by_memcg(
-			mcg, &iowork->io_buf,
+			mcg, infos, &iowork->io_buf,
 			&iowork->ioentry->manager_private);
 	hybperfiowrkend(&iowork->record, HYB_FIND_ESWAP);
 	if (iowork->ioentry->eswapid < 0) {
@@ -5963,7 +5982,7 @@ static int hybridswap_batches_eswap(struct io_work_arg *iowork,
 }
 
 static int hybridswap_do_batches_init(struct io_work_arg **out_sched,
-		struct mem_cgroup *mcg, bool preload)
+		struct mem_cgroup *mcg, struct zram *zram, bool preload)
 {
 	struct io_work_arg *iowork = NULL;
 	ktime_t start = ktime_get();
@@ -5982,7 +6001,7 @@ static int hybridswap_do_batches_init(struct io_work_arg **out_sched,
 			preload ? HYB_PRE_OUT : HYB_BATCH_OUT);
 
 	hybperfiowrkstart(&iowork->record, HYB_INIT);
-	iowork->iohandle = hybridswap_init_plug(MEMCGRP_ITEM(mcg, zram),
+	iowork->iohandle = hybridswap_init_plug(zram,
 			preload ? HYB_PRE_OUT : HYB_BATCH_OUT,
 			iowork);
 	hybperfiowrkend(&iowork->record, HYB_INIT);
@@ -6008,26 +6027,45 @@ static int hybridswap_do_batches(struct mem_cgroup *mcg,
 	int errio = 0;
 	struct io_work_arg *iowork = NULL;
 	struct hyb_info *infos;
+	struct zram *zram = NULL;
 
-	if (unlikely(!mcg || !MEMCGRP_ITEM(mcg, zram))) {
+	/*
+	 * hybs->zram is resolved once, here, and passed down from then on.
+	 * The memcg-id release path can clear the field at any moment -
+	 * mem_cgroup_id_put_many() firing mem_c_group_id_remove_hook() on
+	 * the last id reference, which is a refcount event and not cgroup
+	 * teardown - so every later reader of MEMCGRP_ITEM(mcg, zram) in
+	 * this operation races a NULL write rather than repeating a check
+	 * that has already passed.  Two sleeping allocations happen between
+	 * here and the last of them.
+	 */
+	if (unlikely(!mcg)) {
+		hybp(HYB_WARN, "no mcg!\n");
+		ret = -EINVAL;
+		goto out_no_ref;
+	}
+
+	zram = MEMCGRP_ITEM(mcg, zram);
+	if (unlikely(!zram)) {
 		hybp(HYB_WARN, "no zram in mcg!\n");
 		ret = -EINVAL;
 		goto out_no_ref;
 	}
 
-	infos = hyb_info_get(MEMCGRP_ITEM(mcg, zram));
+	infos = hyb_info_get(zram);
 	if (!infos) {
 		ret = -EINVAL;
 		goto out_no_ref;
 	}
 
-	ret = hybridswap_do_batches_init(&iowork, mcg, preload);
+	ret = hybridswap_do_batches_init(&iowork, mcg, zram, preload);
 	if (unlikely(ret))
 		goto out;
 
 	MEMCGRP_ITEM(mcg, in_swapin) = true;
 	while (size) {
-		if (hybridswap_batches_eswap(iowork, mcg, preload, &errio))
+		if (hybridswap_batches_eswap(iowork, mcg, infos,
+					     preload, &errio))
 			break;
 		size -= ESWAP_SIZE;
 	}
@@ -6042,7 +6080,7 @@ static int hybridswap_do_batches(struct mem_cgroup *mcg,
 
 	if (atomic64_read(&MEMCGRP_ITEM(mcg, hybridswap_stored_size)) &&
 			hybridswap_loglevel() >= HYB_INFO)
-		hybridswap_check_infos_eswap((MEMCGRP_ITEM(mcg, zram)->infos));
+		hybridswap_check_infos_eswap(infos);
 
 	atomic64_inc(&MEMCGRP_ITEM(mcg, hybridswap_incnt));
 	MEMCGRP_ITEM(mcg, in_swapin) = false;
