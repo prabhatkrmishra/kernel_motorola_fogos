@@ -1966,7 +1966,8 @@ static void update_size_info(struct zram *zram, u32 index)
 }
 
 static void move_to_hybridswap(struct zram *zram, u32 index,
-		       unsigned long eswpentry, struct mem_cgroup *mcg)
+		       unsigned long eswpentry, struct mem_cgroup *mcg,
+		       struct hyb_info *infos)
 {
 	int size;
 	struct hybstatus *stat = hybridswap_fetch_stat_obj();
@@ -1979,7 +1980,7 @@ static void move_to_hybridswap(struct zram *zram, u32 index,
 		hybp(HYB_ERR, "NULL zram\n");
 		return;
 	}
-	if (index >= (u32)zram->infos->total_objects) {
+	if (index >= (u32)infos->total_objects) {
 		hybp(HYB_ERR, "index = %d invalid\n", index);
 		return;
 	}
@@ -2008,7 +2009,7 @@ static void move_to_hybridswap(struct zram *zram, u32 index,
 	atomic64_add(size, &stat->stored_size);
 	atomic64_add(size, &MEMCGRP_ITEM(mcg, hybridswap_stored_size));
 	atomic64_inc(&stat->stored_pages);
-	atomic_inc(&zram->infos->eswap_stored_pages[esentry_extid(eswpentry)]);
+	atomic_inc(&infos->eswap_stored_pages[esentry_extid(eswpentry)]);
 	atomic64_inc(&MEMCGRP_ITEM(mcg, hybridswap_stored_pages));
 }
 
@@ -2053,7 +2054,8 @@ static void __move_to_zram(struct zram *zram, u32 index, unsigned long handle,
 	}
 }
 
-static int move_to_zram(struct zram *zram, u32 index, struct io_eswapent *io_eswap)
+static int move_to_zram(struct zram *zram, u32 index,
+			struct io_eswapent *io_eswap, struct hyb_info *infos)
 {
 	unsigned long handle, eswpentry;
 //	struct mem_cgroup *mcg = NULL;
@@ -2064,7 +2066,7 @@ static int move_to_zram(struct zram *zram, u32 index, struct io_eswapent *io_esw
 		hybp(HYB_ERR, "NULL zram\n");
 		return -EINVAL;
 	}
-	if (index >= (u32)zram->infos->total_objects) {
+	if (index >= (u32)infos->total_objects) {
 		hybp(HYB_ERR, "index = %d invalid\n", index);
 		return -EINVAL;
 	}
@@ -2105,6 +2107,7 @@ static int eswap_unlock(struct io_eswapent *io_eswap)
 	int eswapid;
 	struct mem_cgroup *mcg = NULL;
 	struct zram *zram = NULL;
+	struct hyb_info *infos = NULL;
 	int k;
 	unsigned long eswpentry;
 	int real_load = 0, size;
@@ -2130,6 +2133,39 @@ static int eswap_unlock(struct io_eswapent *io_eswap)
 
 	if (MEMCGRP_ITEM(mcg, in_swapin))
 		goto out;
+
+	/*
+	 * Hold a reference across the whole install, not just the put:
+	 * move_to_hybridswap() below reads zram->infos->total_objects and
+	 * bumps eswap_stored_pages, so a NULL check around the final
+	 * put_eswap() would protect nothing.  hyb_info_get() is the
+	 * accessor that cannot race the detach - RCU read plus
+	 * kref_get_unless_zero - where a bare zram->infos can be NULLed
+	 * and freed under us by hybridswap_manager_init().
+	 */
+	infos = hyb_info_get(zram);
+	if (!infos) {
+		/*
+		 * The table this extent indexes into is gone, so the
+		 * install below cannot run.  The slots still have to be
+		 * released: shrink_entry() marked them ZRAM_UNDER_WB on
+		 * their way in and nothing else will clear them, which
+		 * would strand every waiter in zram_wait_slot_inflight()
+		 * and hybridswap_untrack() until they time out.
+		 */
+		for (k = 0; k < io_eswap->cnt; k++) {
+			u32 index = io_eswap->index[k];
+
+			zram_slot_lock(zram, index);
+			zram_clear_flag(zram, index, ZRAM_UNDER_WB);
+			zram_slot_unlock(zram, index);
+			wake_up_var(&zram->table[index].flags);
+		}
+		hybp(HYB_ERR, "no hyb_info, released %d slots\n",
+			io_eswap->cnt);
+		goto out;
+	}
+
 	hybp(HYB_DEBUG, "add eswapid = %d, cnt = %d.\n",
 			eswapid, io_eswap->cnt);
 	eswpentry = ((unsigned long)eswapid) << ESWAP_SHIFT;
@@ -2164,7 +2200,7 @@ static int eswap_unlock(struct io_eswapent *io_eswap)
 			     index, k, io_eswap->cnt);
 			break;
 		}
-		move_to_hybridswap(zram, index, eswpentry, mcg);
+		move_to_hybridswap(zram, index, eswpentry, mcg, infos);
 		size = zram_get_obj_size(zram, index);
 		eswpentry += size;
 		real_load += size;
@@ -2183,10 +2219,12 @@ static int eswap_unlock(struct io_eswapent *io_eswap)
 		}
 		zram_slot_unlock(zram, index);
 	}
-	put_eswap(zram->infos, eswapid);
+	put_eswap(infos, eswapid);
 	io_eswap->eswapid = -EINVAL;
 	hybp(HYB_DEBUG, "add eswap OK.\n");
 out:
+	if (infos)
+		hyb_info_put(infos);
 	discard_io_eswapent(io_eswap, REQ_OP_WRITE);
 	if (mcg)
 		css_put(&mcg->css);
@@ -2199,6 +2237,7 @@ static void eswap_add(struct io_eswapent *io_eswap,
 {
 	struct mem_cgroup *mcg = NULL;
 	struct zram *zram = NULL;
+	struct hyb_info *infos = NULL;
 	int eswapid;
 	int k;
 
@@ -2221,24 +2260,40 @@ static void eswap_add(struct io_eswapent *io_eswap,
 	if (eswapid < 0)
 		goto out;
 
-	io_eswap->cnt = swap_maps_fetch_eswap_index(zram->infos,
+	/*
+	 * Referenced for the whole restore, because move_to_zram() reads
+	 * zram->infos->total_objects and the map we are walking belongs
+	 * to the same table.  A bare zram->infos could be detached and
+	 * freed between those uses.  Bailing here strands nothing: this
+	 * path does not set ZRAM_UNDER_WB, it only fails to bring pages
+	 * back, so the extent stays on the loop device and keeps being
+	 * counted in hybridswap_extcnt - which is where it should be.
+	 */
+	infos = hyb_info_get(zram);
+	if (!infos)
+		goto out;
+
+	io_eswap->cnt = swap_maps_fetch_eswap_index(infos,
 						 eswapid,
 						 io_eswap->index);
 	hybp(HYB_DEBUG, "eswapid = %d, cnt = %d.\n", eswapid, io_eswap->cnt);
 	for (k = 0; k < io_eswap->cnt; k++) {
-		int ret = move_to_zram(zram, io_eswap->index[k], io_eswap);
+		int ret = move_to_zram(zram, io_eswap->index[k], io_eswap,
+					infos);
 
 		if (ret < 0)
 			goto out;
 	}
 	hybp(HYB_DEBUG, "eswap add OK, free eswapid = %d.\n", eswapid);
-	hybridswap_free_eswap(zram->infos, io_eswap->eswapid);
+	hybridswap_free_eswap(infos, io_eswap->eswapid);
 	io_eswap->eswapid = -EINVAL;
 	if (mcg) {
 		atomic64_inc(&MEMCGRP_ITEM(mcg, hybridswap_inextcnt));
 		atomic_dec(&MEMCGRP_ITEM(mcg, hybridswap_extcnt));
 	}
 out:
+	if (infos)
+		hyb_info_put(infos);
 	discard_io_eswapent(io_eswap, REQ_OP_READ);
 	if (mcg)
 		css_put(&mcg->css);
@@ -2247,6 +2302,7 @@ out:
 static void eswap_clear(struct zram *zram, int eswapid)
 {
 	int *index = NULL;
+	struct hyb_info *infos;
 	int cnt;
 	int k;
 	struct hybstatus *stat = hybridswap_fetch_stat_obj();
@@ -2262,7 +2318,14 @@ static void eswap_clear(struct zram *zram, int eswapid)
 		return;
 	}
 
-	cnt = swap_maps_fetch_eswap_index(zram->infos, eswapid, index);
+	/* Referenced across the walk, not just the fetch. */
+	infos = hyb_info_get(zram);
+	if (!infos) {
+		kfree(index);
+		return;
+	}
+
+	cnt = swap_maps_fetch_eswap_index(infos, eswapid, index);
 
 	for (k = 0; k < cnt; k++) {
 		zram_slot_lock(zram, index[k]);
@@ -2277,12 +2340,14 @@ static void eswap_clear(struct zram *zram, int eswapid)
 	}
 
 	kfree(index);
+	hyb_info_put(infos);
 }
 
 static int shrink_entry(struct zram *zram, u32 index, struct io_eswapent *io_eswap,
 		 unsigned long eswap_off)
 {
 	unsigned long handle;
+	struct hyb_info *infos;
 	int size;
 	u8 *src = NULL;
 	struct hybstatus *stat = hybridswap_fetch_stat_obj();
@@ -2295,8 +2360,22 @@ static int shrink_entry(struct zram *zram, u32 index, struct io_eswapent *io_esw
 		hybp(HYB_ERR, "NULL zram\n");
 		return -EINVAL;
 	}
-	if (index >= (u32)zram->infos->total_objects) {
+
+	/*
+	 * Taken before the bounds check below and held to the end, because
+	 * the total_objects read and the whole extent pack below are
+	 * against this table, and io_eswap->index[] is filled in against
+	 * it.  Without a reference the table can be detached and freed
+	 * between the check and the pack, and the indices recorded here
+	 * would be meaningless by the time eswap_unlock() walks them.
+	 */
+	infos = hyb_info_get(zram);
+	if (!infos)
+		return -EINVAL;
+
+	if (index >= (u32)infos->total_objects) {
 		hybp(HYB_ERR, "index = %d invalid\n", index);
+		hyb_info_put(infos);
 		return -EINVAL;
 	}
 
@@ -2304,11 +2383,13 @@ static int shrink_entry(struct zram *zram, u32 index, struct io_eswapent *io_esw
 	handle = zram_get_handle(zram, index);
 	if (!handle || zram_test_skip(zram, index, io_eswap->mcg)) {
 		zram_slot_unlock(zram, index);
+		hyb_info_put(infos);
 		return 0;
 	}
 	size = zram_get_obj_size(zram, index);
 	if (eswap_off + size > ESWAP_SIZE) {
 		zram_slot_unlock(zram, index);
+		hyb_info_put(infos);
 		return -ENOSPC;
 	}
 
@@ -2326,6 +2407,7 @@ static int shrink_entry(struct zram *zram, u32 index, struct io_eswapent *io_esw
 	zram_slot_unlock(zram, index);
 	atomic64_inc(&stat->reclaimin_pages);
 
+	hyb_info_put(infos);
 	return size;
 }
 
@@ -4724,6 +4806,29 @@ int hybridswap_set_enable_init(bool en)
 
 		return -EINVAL;
 	}
+
+	/*
+	 * Drain outstanding reclaim work before manager_init() can detach
+	 * the old table.  Reached only with core disabled - the early
+	 * return above - so no new reclaim is being submitted; what is
+	 * flushed here was queued before the disable.  This is the same
+	 * drain the exit path gets for free from destroy_workqueue(), and
+	 * it is here for the same reason: a reclaim worker walking an
+	 * eswapid against a table being replaced underneath it is walking
+	 * the wrong swap map.
+	 *
+	 * flush_workqueue() cannot close that window by itself - a
+	 * submitter that passed the core_enabled() test in
+	 * hybridswap_out_to_eswap() can still queue after this returns.
+	 * What closes the residual case is the reference each worker now
+	 * takes on entry: a straggler arriving after the detach gets NULL
+	 * from hyb_info_get() and bails without touching the new table.
+	 * The drain is therefore for coherence in the common case and the
+	 * per-operation reference is what makes the leftover case safe -
+	 * neither one alone is complete, which is why both exist.
+	 */
+	if (global_settings.reclaim_wq)
+		flush_workqueue(global_settings.reclaim_wq);
 
 	ret = hybridswap_manager_init(global_settings.zram);
 	if (unlikely(ret)) {
