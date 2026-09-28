@@ -116,6 +116,26 @@ struct zram {
 	 * zram is claimed so open request will be failed
 	 */
 	bool claim; /* Protected by bdev->bd_mutex */
+	/*
+	 * zram_remove() has committed to freeing this device.  Set under
+	 * init_lock immediately before dropping that lock on the way to
+	 * del_gendisk() and kfree(), because del_gendisk() waits for
+	 * in-flight kernfs writers and so the lock cannot be held across
+	 * it.  Every zram sysfs attribute that dereferences struct zram
+	 * checks it while holding init_lock for its own access:
+	 * disksize_store() and hybridswap_zram_increase_store() are the
+	 * writers, and refusing them is what stops the window between
+	 * that unlock and the kfree() from re-arming state - a fresh
+	 * metadata table, an increase_nr_pages budget, or
+	 * global_settings.zram plus the loop-device binding - that the
+	 * kfree() would then leave dangling.  The two hybridswap readers
+	 * that touch the object on their own account,
+	 * hybridswap_loop_device_show() and
+	 * hybridswap_zram_increase_show(), check it too, because their
+	 * only alternative is to read a struct that is about to be
+	 * kfree()d.
+	 */
+	bool dying; /* Protected by init_lock */
 	struct file *backing_dev;
 #ifdef CONFIG_HYBRIDSWAP_ZRAM_WRITEBACK
 	spinlock_t wb_limit_lock;

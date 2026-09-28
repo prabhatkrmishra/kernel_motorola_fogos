@@ -1722,19 +1722,26 @@ out:
 	return ret;
 }
 
-static void zram_reset_device(struct zram *zram)
+/*
+ * Body of zram_reset_device().  The caller must already hold
+ * zram->init_lock for write: zram_remove() needs the teardown to be one
+ * critical section with its hybridswap bound check, and the rwsem is not
+ * recursive, so taking it here would self-deadlock.  It must also have
+ * already established that hybridswap is not bound: zram_remove() does
+ * that in the same critical section, zram_reset_device() in its own.
+ * That is why the check lives in the wrapper rather than here.  Use the
+ * zram_reset_device() wrapper unless you already hold the lock and have
+ * run the check.
+ */
+static void zram_reset_device_locked(struct zram *zram)
 {
 	struct zcomp *comp;
 	u64 disksize;
 
-	down_write(&zram->init_lock);
-
 	zram->limit_pages = 0;
 
-	if (!init_done(zram)) {
-		up_write(&zram->init_lock);
+	if (!init_done(zram))
 		return;
-	}
 
 	comp = zram->comp;
 	disksize = zram->disksize;
@@ -1748,8 +1755,39 @@ static void zram_reset_device(struct zram *zram)
 	memset(&zram->stats, 0, sizeof(zram->stats));
 	zcomp_destroy(comp);
 	reset_bdev(zram);
+}
 
+static int zram_reset_device(struct zram *zram)
+{
+	int ret = 0;
+
+	down_write(&zram->init_lock);
+
+	/*
+	 * The gate zram_remove() has, and for the same reason: this runs
+	 * the identical zram_meta_free() teardown, and zram_free_page()
+	 * ends up in hybridswap_swap_sorted_list_del(), which destroys the
+	 * swap maps of every ZRAM_WB page.  Unlike zram_remove() nothing
+	 * is freed here, so hybridswap would survive the reset - but its
+	 * tables and the per-memcg hybs->zram pointers would still
+	 * describe slots whose metadata table and zsmalloc pool this call
+	 * has just released, and which the next disksize write allocates
+	 * fresh ones over.  Refusing is the only way to keep the two
+	 * views of the device consistent.
+	 */
+#ifdef CONFIG_HYBRIDSWAP_CORE
+	if (hybridswap_zram_bound(zram)) {
+		pr_err("Cannot reset %s: still bound to hybridswap\n",
+				zram->disk->disk_name);
+		ret = -EBUSY;
+	}
+#endif
+
+	if (!ret)
+		zram_reset_device_locked(zram);
 	up_write(&zram->init_lock);
+
+	return ret;
 }
 
 static ssize_t disksize_store(struct device *dev,
@@ -1767,6 +1805,19 @@ static ssize_t disksize_store(struct device *dev,
 	down_write(&zram->init_lock);
 	if (init_done(zram)) {
 		pr_info("Cannot change disksize for initialized device\n");
+		err = -EBUSY;
+		goto out_unlock;
+	}
+
+	/*
+	 * zram_remove() has committed to freeing this device and has
+	 * already torn the old one down, so re-arming disksize here would
+	 * hand the hybridswap bind path a non-zero disksize to latch onto
+	 * a struct zram that is about to be kfree()d.  Refuse before
+	 * zram_meta_alloc() so nothing is allocated.
+	 */
+	if (zram->dying) {
+		pr_info("Cannot set disksize for a device being removed\n");
 		err = -EBUSY;
 		goto out_unlock;
 	}
@@ -1835,7 +1886,14 @@ static ssize_t reset_store(struct device *dev,
 
 	/* Make sure all the pending I/O are finished */
 	fsync_bdev(bdev);
-	zram_reset_device(zram);
+	/*
+	 * May refuse (-EBUSY, hybridswap still bound) before touching
+	 * anything.  The claim and the bdev reference are released on
+	 * that path exactly as on success, and the error is returned
+	 * below through the usual "ret ? ret : count" so userspace sees
+	 * it rather than a success it did not get.
+	 */
+	ret = zram_reset_device(zram);
 	revalidate_disk(zram->disk);
 	bdput(bdev);
 
@@ -1843,7 +1901,7 @@ static ssize_t reset_store(struct device *dev,
 	zram->claim = false;
 	mutex_unlock(&bdev->bd_mutex);
 
-	return len;
+	return ret ? ret : len;
 }
 
 static int zram_open(struct block_device *bdev, fmode_t mode)
@@ -2071,11 +2129,102 @@ static int zram_remove(struct zram *zram)
 	zram->claim = true;
 	mutex_unlock(&bdev->bd_mutex);
 
+	/*
+	 * Make sure all the pending I/O are finished.  Deliberately
+	 * before down_write(): fsync_bdev() sleeps in an unbounded
+	 * filemap_write_and_wait() on the backing device's inode, and
+	 * init_lock is not recursive and has no owner-death requeue, so
+	 * holding it across that sleep blocks every other init_lock user
+	 * - disksize_store(), reset_store(), hybridswap_loop_device_show()
+	 * and the hybridswap bind path - for as long as the writeback
+	 * takes.  Nothing here needs the lock: zram->claim, set above
+	 * under bd_mutex, is what keeps anyone else off the device, and
+	 * the bios this waits for never took init_lock in the first
+	 * place.
+	 */
+	fsync_bdev(bdev);
+
 	zram_debugfs_unregister(zram);
 
-	/* Make sure all the pending I/O are finished */
-	fsync_bdev(bdev);
-	zram_reset_device(zram);
+	/*
+	 * One write region for the bound check AND the teardown, so they
+	 * are a single decision.  hybridswap_loop_device_store() takes
+	 * this same lock before hybridswap_enable_lock and publishes
+	 * global_settings.zram and the loop-device binding under it, so a
+	 * check taken outside the lock would race a bind that lands
+	 * between it and the teardown below, and the bind would hand
+	 * hybridswap a table and a device that this call is about to
+	 * free.
+	 *
+	 * Lock order: hot_remove_store()'s zram_index_mutex -> init_lock
+	 * -> hybridswap_enable_lock.  The last edge is the order the bind
+	 * path already documents (init_lock -> hybridswap_enable_lock), so
+	 * it is consistent rather than new, and nothing reachable from
+	 * here takes zram_index_mutex, so the outer edge cannot invert.
+	 *
+	 * The lock is dropped before del_gendisk() on purpose:
+	 * del_gendisk() waits for in-flight kernfs writers, and a
+	 * hybridswap_loop_device_store() already inside the store could be
+	 * one of them, blocked on this very rwsem.  The zram->dying flag
+	 * set below is what covers that window instead.
+	 */
+	down_write(&zram->init_lock);
+
+	/*
+	 * Refuse while hybridswap is still bound to THIS device.  Its
+	 * global_settings.zram, the per-memcg hybs->zram, the tables
+	 * published through zram->infos and swapd's own swapd_zram all
+	 * survive swapoff, and only hybridswap teardown clears them, so
+	 * the kfree() below would leave hybridswap dereferencing freed
+	 * slab - it would take zram->init_lock from
+	 * hybridswap_unbind_bdev(), the swapd kthreads would keep reading
+	 * swapd_zram on their next round, and every eswap request still
+	 * holding a zram pointer would fault.
+	 *
+	 * This is a refusal, not a cleanup: the only things done so far
+	 * are the claim and the debugfs node, and the branch undoes both,
+	 * so the caller keeps a usable device and can retry.  Note that
+	 * the core-side bindings are only released when the core is torn
+	 * down - the sysfs enable knobs clear the enable flag but leave
+	 * the loop device bound and zram->infos published - while the
+	 * swapd binding goes away with hybridswap_disable().  So a core-
+	 * bound device stays -EBUSY until teardown, and a swapd-only one
+	 * until the enable knob is cleared.  That is the intended trade:
+	 * leaking one device beats handing hybridswap a freed struct
+	 * zram.  Module exit is the backstop: zram_exit() runs
+	 * hybridswap_exit(), whose swapd_exit() and
+	 * hybridswap_exit_core() clear all of them before
+	 * destroy_devices() gets here.
+	 */
+#ifdef CONFIG_HYBRIDSWAP_CORE
+	if (hybridswap_zram_bound(zram)) {
+		pr_err("Cannot remove %s: still bound to hybridswap\n",
+				zram->disk->disk_name);
+		up_write(&zram->init_lock);
+		/* Undo the claim and the debugfs node, let the caller retry */
+		zram_debugfs_register(zram);
+		mutex_lock(&bdev->bd_mutex);
+		zram->claim = false;
+		mutex_unlock(&bdev->bd_mutex);
+		bdput(bdev);
+
+		return -EBUSY;
+	}
+#endif
+
+	zram_reset_device_locked(zram);
+	/*
+	 * From here the device is doomed, so refuse the sysfs writers
+	 * that can still run before del_gendisk() retires the nodes: they
+	 * all check this under init_lock.  Without it, a disksize_store()
+	 * landing in the unlock-to-kfree() gap would re-arm
+	 * zram->disksize and allocate a fresh table, and a
+	 * hybridswap_loop_device_store() would then find a non-zero
+	 * disksize, bind, and publish global_settings.zram - a pointer
+	 * the kfree() below would leave dangling.
+	 */
+	zram->dying = true;
+	up_write(&zram->init_lock);
 	bdput(bdev);
 
 	pr_info("Removed device: %s\n", zram->disk->disk_name);
@@ -2157,19 +2306,54 @@ static struct class zram_control_class = {
 	.class_groups	= zram_control_class_groups,
 };
 
-static int zram_remove_cb(int id, void *ptr, void *data)
-{
-	zram_remove(ptr);
-	return 0;
-}
-
+/*
+ * Tear down every registered zram.  zram_remove()'s refusal is propagated
+ * rather than swallowed: this cannot abort - the remaining devices still
+ * have to go - so the return is inspected to decide whether
+ * unregister_blkdev() is still safe.
+ */
 static void destroy_devices(void)
 {
+	bool unregister_major = true;
+	void *ptr;
+	int id;
+
 	class_unregister(&zram_control_class);
-	idr_for_each(&zram_index_idr, &zram_remove_cb, NULL);
+	/*
+	 * Walk the idr by hand rather than through idr_for_each(): the
+	 * removal can now be refused, and idr_for_each() would stop at the
+	 * first refusal and leave every device after it registered.  The id
+	 * is also what names the survivor below.
+	 *
+	 * The message is deliberately short - a split string literal is not
+	 * greppable, which defeats the point of naming the device.  The
+	 * consequence of the refusal, that the survivor's gendisk still
+	 * points fops at zram module text that is about to be freed, is
+	 * spelled out in the comment below instead.
+	 */
+	for (id = 0; (ptr = idr_get_next(&zram_index_idr, &id)) != NULL; id++) {
+		if (zram_remove(ptr)) {
+			unregister_major = false;
+			pr_err("zram%d: removal refused, device kept\n", id);
+		}
+	}
 	zram_debugfs_destroy();
 	idr_destroy(&zram_index_idr);
-	unregister_blkdev(zram_major, "zram");
+	/*
+	 * A device that refused to be removed is still registered, with
+	 * zram->disk->fops still pointing into this module's text and its
+	 * major/minor still carrying this driver's name.  Name that
+	 * consequence, then keep the major: unregistering it would hand the
+	 * live gendisk's major/minor to the next register_blkdev() caller,
+	 * which is strictly worse than a leaked major number, and holding
+	 * the major is the only thing that still makes the survivor's
+	 * device node name this driver.  The WARN_ON_ONCE is the marker an
+	 * operator greps for when the resulting use-after-free fires.
+	 */
+	if (unregister_major)
+		unregister_blkdev(zram_major, "zram");
+	else
+		WARN_ON_ONCE(1);
 	cpuhp_remove_multi_state(CPUHP_ZCOMP_PREPARE);
 }
 
@@ -2223,6 +2407,47 @@ out_error:
 
 static void __exit zram_exit(void)
 {
+	/*
+	 * hybridswap first, destroy_devices() second, and the order is
+	 * load-bearing in both directions.
+	 *
+	 * hybridswap_exit() must see every device still alive.  Its
+	 * swapd_exit() stops the kthreads that dereference swapd_zram, and
+	 * its hybridswap_exit_core() reads global_settings.zram, walks the
+	 * memcg list, detaches zram->infos and unbinds the loop device
+	 * through hybridswap_unbind_bdev(), which takes zram->init_lock.
+	 * After destroy_devices() those would all be reads and lock
+	 * acquisitions on a struct zram that kfree() has returned to
+	 * kmem_cache - and zram_reset_device_locked() would already have
+	 * run reset_bdev(), so the unbind would be a second close of a
+	 * bdev that is gone.  The slab cache it destroys last is the one
+	 * every MEMCGRP_ITEM_DATA(memcg) object is carved from, so the
+	 * per-memcg walk has to have run before that too.
+	 *
+	 * destroy_devices() needs hybridswap to have finished, not to be
+	 * alive: it wants exactly the pointers cleared.  zram_remove()'s
+	 * hybridswap_zram_bound() check reads global_settings.zram,
+	 * zram->infos and swapd_zram, all NULL by then, so the -EBUSY
+	 * refusal does not fire and the device is torn down as normal; it
+	 * only touches the still-valid hybridswap_enable_lock mutex, and
+	 * the check itself still lives.  zram_free_page()'s
+	 * hybridswap_untrack() and zram_slot_free_notify()'s
+	 * hybridswap_delete() both return at their
+	 * hybridswap_core_enabled() test, which hybridswap_exit_core() has
+	 * already cleared, so no path reaches the freed tables or the
+	 * destroyed slab cache.  The hybridswap symbols themselves are
+	 * still mapped - this is module_exit, the text is not unmapped
+	 * until it returns.
+	 *
+	 * hybridswap_pre_init() is called from zram_init() and unwinds
+	 * itself on every failure path (it drops the cftypes it added,
+	 * frees the duplicated tables and destroys hybridswap_cache), so
+	 * there is no matching pre-deinit to call here: reaching this
+	 * function already implies pre_init() succeeded.
+	 */
+#ifdef CONFIG_HYBRIDSWAP
+	hybridswap_exit();
+#endif
 	destroy_devices();
 }
 

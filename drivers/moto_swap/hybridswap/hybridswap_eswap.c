@@ -2357,17 +2357,57 @@ static int shrink_entry_list(struct io_eswapent *io_eswap)
 
 void hybridswap_manager_deinit(struct zram *zram)
 {
+	struct mem_cgroup *mcg;
+
 	if (!zram) {
 		hybp(HYB_ERR, "NULL zram\n");
 		return;
 	}
 
 	/*
-	 * Detach the tables from the device; in-flight holders keep
+	 * Detach the tables from the device FIRST; in-flight holders keep
 	 * them alive via their references and RCU retires the memory
 	 * once the last one is gone.
 	 */
 	hyb_info_detach(zram);
+
+	/*
+	 * THEN drop the per-memcg pointers, under each memcg's own
+	 * zram_init_lock, which is the lock hybridswap_record() holds
+	 * around the re-arm in hybridswap_manager_memcg_init().
+	 *
+	 * The order is what makes this a barrier and not a snapshot.
+	 * hybridswap_record() takes its zram->infos reference before it
+	 * looks at hybs->zram, and hybridswap_manager_memcg_init() itself
+	 * refuses to publish hybs->zram when zram->infos is NULL, so once
+	 * hyb_info_detach() has returned no record() can put this device
+	 * back on a memcg: the re-check of zram->infos below is the
+	 * belt-and-braces version of that, for the record() that had
+	 * already taken its reference before the detach landed.  Clearing
+	 * first and detaching second would leave exactly that record() to
+	 * re-arm a pointer onto tables that are about to be retired.
+	 *
+	 * The walk is the fetch_next_memcg() idiom of
+	 * hybridswap_memcg_iter(): fetch_next_memcg() takes a css reference
+	 * on the memcg it returns and drops the one it was handed, so the
+	 * loop terminates with mcg == NULL and there is no reference left
+	 * to release - which is why that helper is not called here.
+	 *
+	 * A memcg whose hybs->zram points at a different zram is left
+	 * alone: it is not this device's.
+	 */
+	mcg = fetch_next_memcg(NULL);
+	while (mcg) {
+		memcg_hybs_t *hybs = MEMCGRP_ITEM_DATA(mcg);
+
+		if (hybs) {
+			spin_lock(&hybs->zram_init_lock);
+			if (hybs->zram == zram && !READ_ONCE(zram->infos))
+				hybs->zram = NULL;
+			spin_unlock(&hybs->zram_init_lock);
+		}
+		mcg = fetch_next_memcg(mcg);
+	}
 }
 
 int hybridswap_manager_init(struct zram *zram)
@@ -2520,7 +2560,16 @@ void hybridswap_manager_memcg_deinit(struct mem_cgroup *mcg)
 		put_eswap(infos, eswapid);
 	}
 	hybp(HYB_DEBUG, "deinit mcg %d %s, eswap done\n", mcg->id.id, hybs->name);
+	/*
+	 * The same lock hybridswap_record() holds around hybs->zram, and
+	 * around hybridswap_manager_deinit()'s clear of it.  Nothing is
+	 * held here - the slot bit-locks above are all released - and
+	 * this lock is innermost everywhere, so taking it adds no new
+	 * order edge.
+	 */
+	spin_lock(&hybs->zram_init_lock);
 	hybs->zram = NULL;
+	spin_unlock(&hybs->zram_init_lock);
 }
 void hybridswap_swap_sorted_list_add(struct zram *zram,
 			    u32 index, struct mem_cgroup *memcg)
@@ -4478,6 +4527,61 @@ void hybridswap_global_setting_deinit(void)
 }
 
 /*
+ * True while hybridswap holds state that still points at @zram:
+ * global_settings.zram, the loop-device binding that
+ * hybridswap_unbind_bdev() and hybridswap_exit_core() dereference;
+ * zram->infos, the per-memcg tables that hybs->zram and every ZRAM_WB
+ * page were resolved against; and swapd_zram, which the swapd kthreads
+ * dereference on every reclaim round.  A zram_remove() that reached
+ * kfree() with any of them still set would leave that one dangling.
+ *
+ * This is a check of hybridswap's own pointers only.  It says nothing
+ * about references held outside hybridswap - a bound loop device held
+ * by the block layer, an open file, a mounted filesystem - but those are
+ * bd_openers/zram->claim's problem, and they are checked by the caller
+ * before this runs.
+ *
+ * Deliberately NOT gated on hybridswap_core_enabled(): disabling the
+ * core only clears the enable atomics.  It neither unbinds the loop
+ * device (only hybridswap_io_work_end() does, via
+ * hybridswap_global_setting_deinit()) nor detaches zram->infos (only
+ * hybridswap_manager_deinit() does), so both of those pointers outlive
+ * the enable flag and stay live until the core is torn down.  The swapd
+ * term is independent of all of that: swapd is a separate subsystem
+ * with its own enable, and its binding is released by swapd_exit(), not
+ * by anything the core teardown calls.
+ *
+ * global_settings.zram is written by hybridswap_global_setting_init(),
+ * which every caller reaches under hybridswap_enable_lock, so read it
+ * under that lock.  swapd_zram is published by swapd_init() and cleared
+ * by swapd_exit(), and both run from hybridswap_enable()/
+ * hybridswap_disable() under that same lock, so it is read here too.
+ * Lock order: hybridswap_zram_bound()'s caller (zram_remove) already
+ * holds init_lock for write, so this is the documented
+ * init_lock -> hybridswap_enable_lock edge, and no hybridswap path
+ * takes the caller's zram_index_mutex.  No inversion is created by the
+ * swapd term: swapd_exit() clears the pointer *outside* swapd_lock
+ * precisely so that this read needs no second lock, and
+ * hybridswap_enable_lock -> swapd_lock is the order swapd_init()
+ * already establishes from the same caller.  zram->infos is published
+ * and detached under the same mutex by hybridswap_manager_init()/
+ * _deinit() with the sole exception of the module-exit teardown, hence
+ * READ_ONCE() rather than a plain dereference.
+ */
+bool hybridswap_zram_bound(struct zram *zram)
+{
+	bool bound;
+
+	mutex_lock(&hybridswap_enable_lock);
+	bound = (global_settings.zram == zram) ||
+		(READ_ONCE(zram->infos) != NULL) ||
+		(hybridswap_swapd_zram() == zram);
+	mutex_unlock(&hybridswap_enable_lock);
+
+	return bound;
+}
+
+/*
  * Tear down everything hyb_io_work_begin() and
  * hybridswap_global_setting_init() created.  stat and reclaim_wq are
  * created together, so stat != NULL implies reclaim_wq != NULL.
@@ -4503,14 +4607,41 @@ void hybridswap_io_work_end(void)
  */
 void hybridswap_exit_core(void)
 {
+	struct zram *zram;
+
 	hybridswap_core_disable();
+
+	/*
+	 * Capture the device BEFORE the workqueue teardown.
+	 * hybridswap_io_work_end() -> hybridswap_global_setting_deinit()
+	 * NULLs global_settings.zram as its last act, so reading it after
+	 * that call is always NULL and the manager_deinit()/unbind_bdev()
+	 * below was unreachable - leaving zram->infos published and the
+	 * loop device bound for the life of the module, which is what made
+	 * a zram_remove() refusal permanently uncancellable.
+	 */
+	zram = global_settings.zram;
 
 	if (hyb_io_work_begin_flag || global_settings.stat)
 		hybridswap_io_work_end();
 
-	if (global_settings.zram) {
-		hybridswap_manager_deinit(global_settings.zram);
-		hybridswap_unbind_bdev(global_settings.zram);
+	/*
+	 * Safe after the workqueue teardown, and required to be:
+	 * hybridswap_manager_deinit() only walks the memcg list and
+	 * detaches zram->infos, and hybridswap_unbind_bdev() only does
+	 * reset_bdev() under zram->init_lock.  destroy_workqueue() above
+	 * has already drained every eswap worker, so nothing can be
+	 * mid-request against either the tables or the backing device.
+	 * Detaching the tables before releasing the loop device is also
+	 * the right order: nothing may resolve an eswap through a loop
+	 * device whose per-memcg tables are already gone.
+	 *
+	 * zram->init_lock is taken here, but only from this teardown
+	 * context, never nested inside a holder of it.
+	 */
+	if (zram) {
+		hybridswap_manager_deinit(zram);
+		hybridswap_unbind_bdev(zram);
 	}
 }
 
@@ -4632,6 +4763,24 @@ ssize_t hybridswap_loop_device_store(struct device *dev,
 
 	zram = dev_to_zram(dev);
 	down_write(&zram->init_lock);
+	/*
+	 * zram_remove() has committed to freeing this device.  It has to
+	 * drop init_lock before del_gendisk(), so between that unlock and
+	 * the kfree() this node still accepts writers, and the teardown
+	 * only frees - it re-arms nothing.  Refuse here, before anything
+	 * is published, so global_settings.zram and the loop-device
+	 * binding can never come to point at a struct zram that is about
+	 * to be freed.  This is the unconditional gate: the disksize test
+	 * below only happens to catch the case where the teardown got far
+	 * enough to zero disksize, and says nothing about a device that
+	 * was never initialised.
+	 */
+	if (zram->dying) {
+		hybp(HYB_ERR, "device is being removed\n");
+		ret = -EBUSY;
+		goto out;
+	}
+
 	if (zram->disksize == 0) {
 		hybp(HYB_ERR, "disksize is 0\n");
 		goto out;
@@ -4662,6 +4811,20 @@ ssize_t hybridswap_loop_device_show(struct device *dev,
 	struct zram *zram = dev_to_zram(dev);
 
 	down_read(&zram->init_lock);
+	/*
+	 * Same gate, same position, same answer as the write paths: a
+	 * dying device is about to have its struct zram kfree()d, and the
+	 * zram->backing_dev read below is a dereference of it.  Refuse
+	 * rather than report a binding for a device that no longer
+	 * exists; -EBUSY names the cause, and the caller already gets a
+	 * truthful error instead of a plausible-looking string.
+	 */
+	if (zram->dying) {
+		hybp(HYB_ERR, "device is being removed\n");
+		up_read(&zram->init_lock);
+		return -EBUSY;
+	}
+
 	if (!zram->backing_dev) {
 		memcpy(buf, "none\n", 5);
 		up_read(&zram->init_lock);
@@ -4737,16 +4900,48 @@ ssize_t hybridswap_zram_increase_store(struct device *dev,
 	char *type_buf = NULL;
 	unsigned long val;
 	struct zram *zram = dev_to_zram(dev);
+	int ret = 0;
 
+	/* Parsing only looks at the buffer, so it needs no lock. */
 	type_buf = strstrip((char *)buf);
 	if (kstrtoul(type_buf, 0, &val))
 		return -EINVAL;
 
-	if (val > (zram->disksize >> (PAGE_SHIFT + 8)))
-		return -EINVAL;
+	/*
+	 * zram_remove() has committed to freeing this device.  It has to
+	 * drop init_lock before del_gendisk(), so between that unlock and
+	 * the kfree() this node still accepts writers, and the teardown
+	 * only frees - it re-arms nothing.  This is the same unconditional
+	 * gate hybridswap_loop_device_store() and disksize_store() take,
+	 * for the same reason: the disksize read and the
+	 * increase_nr_pages write below are dereferences of a struct zram
+	 * that is about to be freed, and the write would arm state on a
+	 * device whose teardown is already committed.  Refuse before
+	 * either touches the object.
+	 *
+	 * init_lock is the lock this driver already uses for exactly this
+	 * on every one of its zram attribute handlers, and rwsems are
+	 * sleepable, so taking it here cannot deadlock - no zram sysfs
+	 * handler is ever entered holding init_lock, so the check cannot
+	 * re-enter a lock its own caller holds.
+	 */
+	down_write(&zram->init_lock);
+	if (zram->dying) {
+		hybp(HYB_ERR, "device is being removed\n");
+		ret = -EBUSY;
+		goto out;
+	}
+
+	if (val > (zram->disksize >> (PAGE_SHIFT + 8))) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	zram->increase_nr_pages = (val << 8);
-	return len;
+
+out:
+	up_write(&zram->init_lock);
+	return ret ? ret : len;
 }
 
 ssize_t hybridswap_zram_increase_show(struct device *dev,
@@ -4754,11 +4949,32 @@ ssize_t hybridswap_zram_increase_show(struct device *dev,
 {
 	ssize_t size = 0;
 	struct zram *zram = dev_to_zram(dev);
+	int ret = 0;
+
+	/*
+	 * Same gate as the stores, in the read form these show handlers
+	 * use: reading the flag is not itself the hazard, reading
+	 * increase_nr_pages through it on a dying device is, so take the
+	 * read lock the other zram shows here use, refuse inside it, and
+	 * report the error instead of a number read out of a struct zram
+	 * that zram_remove() is about to kfree().  Holding the lock across
+	 * the read is what makes the flag mean anything: a reader that
+	 * got the lock first completes before zram_remove() can set dying,
+	 * and one that gets it after sees the flag.
+	 */
+	down_read(&zram->init_lock);
+	if (zram->dying) {
+		hybp(HYB_ERR, "device is being removed\n");
+		ret = -EBUSY;
+		goto out;
+	}
 
 	size += scnprintf(buf + size, PAGE_SIZE - size,
 		"%lu\n", zram->increase_nr_pages >> 8);
 
-	return size;
+out:
+	up_read(&zram->init_lock);
+	return ret ? ret : size;
 }
 
 int mem_cgroup_stored_wm_scale_write(

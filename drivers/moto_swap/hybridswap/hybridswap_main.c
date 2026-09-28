@@ -1138,6 +1138,117 @@ error_out:
 	return ret;
 }
 
+/*
+ * Hand every per-memcg object back to the slab cache that carved it.
+ *
+ * The only thing that ever called put_memcg_cache() was
+ * mem_cgroup_free_hook(), and unregister_all_hook() has already dropped
+ * it by the time this runs, so every live memcg - the root one
+ * included - is still holding an object.  kmem_cache_destroy() reports
+ * a non-empty cache as "Slab cache still has objects" plus a
+ * dump_stack(), and with CONFIG_SLUB_DEBUG the shutdown path emits a
+ * slab_err per slab and an INFO per object, so this fires on every
+ * unload.  Freeing the objects is the fix; leaving the cache alive would
+ * just leak the cache itself.
+ *
+ * Deliberately NOT the alternative of keeping mem_cgroup_free_hook()
+ * registered until after kmem_cache_destroy(): unregister_trace_*() only
+ * guarantees that no *new* call is dispatched, not that an in-flight one
+ * has returned, so a hook left armed across the cache teardown can call
+ * put_memcg_cache() - kmem_cache_free() - on a destroyed cache.  A leak
+ * is recoverable; that is not.  Hence the explicit drain, run after the
+ * hook is gone.
+ *
+ * One object per memcg the grade list knows about, and that list is the
+ * only registry of allocated objects: hybridswap_cache_alloc() publishes
+ * into MEMCG_OEM_DATA() but links nothing, and it is
+ * mem_cgroup_css_online_hook() that adds the node.  A memcg that was
+ * allocated but never came online - created and torn down inside the
+ * window where the alloc hook ran but the online hook did not - is
+ * therefore not on the list and cannot be reached from here.  That gap
+ * is left as found rather than papered over: an object nothing
+ * references any more is inert, it cannot fault, and hunting it down
+ * would mean walking the cgroup tree with a different and less tested
+ * idiom at the one moment in the module lifetime where a mistake is a
+ * use-after-free.
+ *
+ * Lock: grade_list_lock, which mem_cgroup_free_hook() itself does not
+ * need - that hook only clears a field and frees, with no list
+ * membership to fix up.  This walk does have a node to unlink, and the
+ * hook that would otherwise unlink it is
+ * mem_cgroup_css_offline_hook(), which takes exactly this spinlock, so
+ * the lock is what keeps the two from racing over grade_node.  With the
+ * hooks already unregistered nothing can in fact be walking the list, so
+ * this is belt-and-braces.  It is held only around each node's own
+ * unlink, never across the walk - fetch_next_memcg() takes it itself -
+ * and put_memcg_cache() is deliberately called after the drop, so the
+ * lock is never taken twice on one path and never held across the free.
+ *
+ * The walk is the fetch_next_memcg() idiom of
+ * hybridswap_memcg_iter(), but with the successor fetched BEFORE the
+ * current node is unlinked, which the plain idiom does not allow:
+ * fetch_next_memcg() finds its starting point at
+ * MEMCGRP_ITEM(prev, grade_node), so once list_del_init() has run on
+ * that node the list looks empty and the walk would stop after the
+ * first memcg, leaving every object after it allocated.  A css
+ * reference is held across the unlink and the free for the same reason:
+ * fetch_next_memcg() drops the reference it was handed as soon as it
+ * returns, so without one of our own the memcg could be torn down under
+ * this pointer.
+ */
+static void hybridswap_drain_memcg_cache(void)
+{
+	struct mem_cgroup *memcg;
+	unsigned long flags;
+
+	memcg = fetch_next_memcg(NULL);
+	while (memcg) {
+		struct mem_cgroup *next;
+		memcg_hybs_t *hybs;
+
+		/*
+		 * The node fetch_next_memcg() hands back is the one in this
+		 * memcg's oem field: hybridswap_cache_alloc() sets
+		 * hybs->memcg and publishes the pointer together, and
+		 * memcg_app_grade_update() links that same object, so the two
+		 * cannot name different objects.  That is what makes the
+		 * list_del_init() below safe - the node is genuinely linked,
+		 * and a memcg that css_offline already unlinked is not
+		 * reachable from this walk at all.
+		 */
+		css_get(&memcg->css);
+		next = fetch_next_memcg(memcg);
+
+		spin_lock_irqsave(&grade_list_lock, flags);
+		hybs = (memcg_hybs_t *)MEMCG_OEM_DATA(memcg);
+		if (hybs) {
+			/*
+			 * Clear before freeing: the memcg keeps the field
+			 * for the rest of its life, and anything that
+			 * reaches it afterwards - a css_online hook that
+			 * slipped past unregister_all_hook(), or a later
+			 * hybridswap_cache_alloc() - must see NULL rather
+			 * than a pointer into a destroyed cache.  Same
+			 * order mem_cgroup_free_hook() uses.
+			 */
+			MEMCG_OEM_DATA(memcg) = 0;
+			/*
+			 * Unlink before the free, or the grade list would
+			 * still point into the slab for anything that walks
+			 * it before the module text goes away.  Same as
+			 * mem_cgroup_css_offline_hook()'s list_del_init().
+			 */
+			list_del_init(&hybs->grade_node);
+		}
+		spin_unlock_irqrestore(&grade_list_lock, flags);
+
+		if (hybs)
+			put_memcg_cache(hybs);
+		css_put(&memcg->css);
+		memcg = next;
+	}
+}
+
 void __exit hybridswap_exit(void)
 {
 	unregister_all_hook();
@@ -1148,6 +1259,16 @@ void __exit hybridswap_exit(void)
 	swapd_pre_deinit();
 #endif
 
+	/*
+	 * The last consumer of the per-memcg objects, so it has to run
+	 * before the drain below.  hybridswap_manager_deinit() walks the
+	 * memcg list and dereferences MEMCGRP_ITEM_DATA() of every node it
+	 * finds: it reads hybs->zram and takes hybs->zram_init_lock on it.
+	 * Draining first would hand that walk a freed object.  Order here
+	 * is therefore: every hybridswap consumer of the objects runs
+	 * first, and only once none is left are they freed and the cache
+	 * destroyed.
+	 */
 	hybridswap_exit_core();
 
 	if (hybs_dfl_files) {
@@ -1165,6 +1286,15 @@ void __exit hybridswap_exit(void)
 	}
 	cgroup_rm_cftypes(mem_cgroup_swapd_legacy_files);
 #endif
+
+	/*
+	 * After the cgroup_rm_cftypes() calls above, so no userspace write
+	 * can re-enter through a hybridswap file and rebuild an object out
+	 * of the cache that is about to be destroyed, and before
+	 * kmem_cache_destroy(), which is the whole point: the cache must
+	 * be empty or the destroy reports objects still held.
+	 */
+	hybridswap_drain_memcg_cache();
 
 	if (hybridswap_cache) {
 		kmem_cache_destroy(hybridswap_cache);

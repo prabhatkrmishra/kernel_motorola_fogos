@@ -33,6 +33,13 @@
 #define MEMCG_OEM_DATA(memcg) ((memcg)->android_oem_data1)
 #endif
 #include "hybridswap_internal.h"
+/*
+ * For hybridswap_swapd_zram()'s prototype.  Included after the internal
+ * header because hybridswap.h refers to struct zram and struct
+ * mem_cgroup, which only the zram_drv.h include above and the internal
+ * header have introduced by then.
+ */
+#include "hybridswap.h"
 
 #define MOTO_SWAP_VERSION 3
 
@@ -1979,12 +1986,52 @@ refresh_daemonfail:
 void swapd_exit(void)
 {
 	unregister_memory_notifier(&swapd_notifier_nb);
+	/*
+	 * Order is load-bearing: destroy_swapd_thread() has to return
+	 * before swapd_zram is cleared, because the swapd kthreads read it
+	 * on every reclaim round - fetch_nr_zram_total() and
+	 * get_hybridswap_meminfo() both dereference it.  Clearing it first
+	 * would only be safe if the threads were guaranteed not to be
+	 * mid-round, and kthread_stop() is what establishes that.
+	 */
 	destroy_swapd_thread();
 	refresh_daemonexit();
 	atomic_set(&swapd_enabled, 0);
+	/*
+	 * Last, and deliberately not under swapd_lock: the field is
+	 * published and cleared under hybridswap_enable_lock instead.  The
+	 * two sysfs callers - hybridswap_enable() and hybridswap_disable(),
+	 * both reached from hybridswap_enable_store() - already hold it, as
+	 * does the hybridswap_exit() caller in the sense that it is the only
+	 * teardown left running by then, and it is the lock
+	 * hybridswap_zram_bound() reads the field under.  Taking
+	 * swapd_lock as well would only imply a pairing the readers do not
+	 * have: fetch_nr_zram_total() reads the pointer with no lock at all,
+	 * from the kthreads this teardown has just stopped.
+	 *
+	 * Without this the pointer outlived the teardown, so a plain
+	 * hot_remove of that zram passed hybridswap_zram_bound() - which
+	 * tested global_settings.zram and zram->infos, neither of which
+	 * swapd sets - and kfree()d the struct zram under a swapd that was
+	 * still nominally enabled.
+	 */
+	swapd_zram = NULL;
 }
 
 bool hybridswap_swapd_enabled(void)
 {
 	return !!atomic_read(&swapd_enabled);
+}
+
+/*
+ * The device swapd_init() bound, or NULL once swapd_exit() has run.  An
+ * accessor rather than a direct reference because swapd_zram is
+ * file-static and hybridswap_eswap.c has to be able to see that the
+ * pointer exists; no EXPORT_SYMBOL because this is one module, not a
+ * cross-module interface.  The non-SWAPD build gets the NULL stub in
+ * hybridswap_internal.h.
+ */
+struct zram *hybridswap_swapd_zram(void)
+{
+	return swapd_zram;
 }
