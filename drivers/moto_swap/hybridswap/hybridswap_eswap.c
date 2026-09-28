@@ -2537,6 +2537,26 @@ int hybridswap_manager_init(struct zram *zram)
 	 * Reuse the existing tables when they still match the device
 	 * geometry, so an enable/disable/enable cycle neither leaks
 	 * the old tables nor orphans WB pages that reference them.
+	 *
+	 * Reaching the detach below therefore needs the geometry to have
+	 * changed, and on this configuration it cannot.  Both halves of
+	 * the condition are constant:
+	 *
+	 *   disksize   - disksize_store() refuses with -EBUSY on an
+	 *                already-initialised device, so it is fixed for
+	 *                the lifetime of the struct.
+	 *   nr_pages   - assigned only in backing_dev_store(), and that
+	 *                is compiled out when HYBRIDSWAP_ZRAM_WRITEBACK
+	 *                is off, as it is in the fogos config.
+	 *
+	 * So this looks like a live teardown trigger but is not one here.
+	 * Do not conclude the drain in hybridswap_set_enable_init() is
+	 * unnecessary from reading this alone: hyb_info_detach() is also
+	 * reached from the out: label below when alloc_hyb_info() fails,
+	 * which is reachable from the sysfs core-enable path and has no
+	 * other drain.  A build with HYBRIDSWAP_ZRAM_WRITEBACK=y would
+	 * also make the geometry branch live again, and the drain would
+	 * be load-bearing for it.
 	 */
 	old = rcu_dereference_protected(zram->infos, true);
 	if (old && old->total_objects == (int)(zram->disksize >> PAGE_SHIFT) &&
