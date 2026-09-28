@@ -756,6 +756,13 @@ static void hybridswap_io_req_release(struct kref *ref)
 	if (req->io_para.complete_notify && req->io_para.private)
 		req->io_para.complete_notify(req->io_para.private);
 
+	/*
+	 * Owned by the request, not by the caller's io_work_arg: for
+	 * FAULT_OUT that struct is the faulting task's stack frame and
+	 * may already be gone by the time the last put runs here.
+	 */
+	hyb_info_put(req->io_para.infos);
+
 	kfree(req);
 }
 
@@ -901,8 +908,19 @@ static void hybridswap_errio_proc(struct hybridswap_io_req *req,
 	hybridswap_errio_record(HYB_FAULT_OUT_IO_FAIL, req,
 		segment->io_entries_fifo[0]->eswapid);
 	hybridswap_doing_dec(req, segment->page_cnt);
-	hybridswap_io_end_wake_up(req);
+	/*
+	 * The done callbacks run against ioentry->private, which for
+	 * FAULT_OUT points into the faulting task's stack frame.  Free
+	 * the segment before signalling the completion: for FAULT_OUT
+	 * hybridswap_io_end_wake_up() does complete(&req->io_end_flag),
+	 * which releases the faulting task out of
+	 * hybridswap_wait_io_finish() and lets it return from
+	 * hybridswap_page_fault() and pop that frame while we are
+	 * still reading it.  Matches the ordering in
+	 * hybridswap_io_end_work().
+	 */
 	hyb_sgm_free(req, segment);
+	hybridswap_io_end_wake_up(req);
 	kref_put(&req->refcount, hybridswap_io_req_release);
 }
 
@@ -1334,6 +1352,7 @@ void *hybridswap_plug_start(struct hybridswap_io *io_para)
 	req->io_para.complete_notify = io_para->complete_notify;
 	req->io_para.private = io_para->private;
 	req->io_para.record = io_para->record;
+	req->io_para.infos = io_para->infos;
 	req->limit_doing_flag =
 		(io_para->class == HYB_RECLAIM_IN) ||
 		(io_para->class == HYB_PRE_OUT);
@@ -3967,6 +3986,7 @@ err_out:
 
 int fetch_eswap(struct hyb_info *infos, int eswapid)
 {
+	int index;
 	int memcgid;
 
 	if (!infos) {
@@ -3978,13 +3998,31 @@ int fetch_eswap(struct hyb_info *infos, int eswapid)
 		return -EINVAL;
 	}
 
-	if (!hyb_entries_clear_priv(eswap_index(infos, eswapid), infos->eswap_table))
+	index = eswap_index(infos, eswapid);
+	if (!hyb_entries_clear_priv(index, infos->eswap_table))
 		return -EBUSY;
-	memcgid = hyb_entries_fetch_memcgid(eswap_index(infos, eswapid), infos->eswap_table);
+	memcgid = hyb_entries_fetch_memcgid(index, infos->eswap_table);
 	if (memcgid) {
+		/*
+		 * eswap_frag_info_sub() walks this memcg's eswap list via
+		 * prev_index()/next_index() in pre_is_conted()/
+		 * ne_is_conted() and updates infos->memcgid_cnt[memcgid]
+		 * as a plain counter, so the unlink and the frag
+		 * accounting both need the list-head lock the splice
+		 * already requires.  Head before node is the only order
+		 * used in this table, so taking the head here adds no
+		 * inversion.  The claim taken by clear_priv() above, not
+		 * this lock, is what excludes a concurrent
+		 * hybridswap_free_eswap(): it has to claim the entry to
+		 * clear its memcgid, and we are that sole claimant.
+		 */
+		hyb_lock_with_idx(memcgindex(infos, memcgid),
+				infos->eswap_table);
 		eswap_frag_info_sub(infos, eswapid);
-		hyb_entries_del(eswap_index(infos, eswapid), memcgindex(infos, memcgid),
-			    infos->eswap_table);
+		hyb_entries_del_nolock(index, memcgindex(infos, memcgid),
+				infos->eswap_table);
+		hyb_unlock_with_idx(memcgindex(infos, memcgid),
+				infos->eswap_table);
 	}
 	hybp(HYB_DEBUG, "eswap id = %d\n", eswapid);
 
@@ -5009,23 +5047,15 @@ static void hybridswap_free_pagepool(struct io_work_arg *iowork)
 }
 
 /*
- * Completion notify for the synchronous FAULT_OUT class: its
- * io_work_arg lives on the faulting task's stack, so unlike
- * hybridswap_plug_complete() it must not be freed here - only the
- * table reference is released, after all end-io work is done.
+ * Completion notify for the classes whose io_work_arg is heap
+ * allocated.  FAULT_OUT is deliberately absent: its io_work_arg is
+ * the faulting task's stack frame, so the release must not reach
+ * back into it.  The table reference it took is owned by the
+ * request instead and is dropped by hybridswap_io_req_release().
  */
-static void hybridswap_fault_io_release(void *data)
-{
-	struct io_work_arg *iowork = (struct io_work_arg *)data;
-
-	hyb_info_put(iowork->infos);
-}
-
 static void hybridswap_plug_complete(void *data)
 {
 	struct io_work_arg *iowork  = (struct io_work_arg *)data;
-
-	hyb_info_put(iowork->infos);
 
 	hybridswap_free_pagepool(iowork);
 
@@ -5042,8 +5072,9 @@ static void *hybridswap_init_plug(struct zram *zram,
 
 	/*
 	 * Hold the tables alive for as long as this I/O chain can
-	 * reach them. The reference is dropped by the completion
-	 * notify, which runs only after every end-io work (including
+	 * reach them. The reference is handed to the request, which
+	 * drops it in hybridswap_io_req_release() once the last kref
+	 * put is done, i.e. only after every end-io work (including
 	 * error callbacks) has finished touching the tables.
 	 */
 	iowork->infos = hyb_info_get(zram);
@@ -5054,6 +5085,7 @@ static void *hybridswap_init_plug(struct zram *zram,
 	io_para.class = class;
 	io_para.private = (void *)iowork;
 	io_para.record = &iowork->record;
+	io_para.infos = iowork->infos;
 	INIT_LIST_HEAD(&iowork->data.page_pool.page_pool_list);
 	spin_lock_init(&iowork->data.page_pool.page_pool_lock);
 	io_para.done_callback = hybridswap_flush_done;
@@ -5068,7 +5100,17 @@ static void *hybridswap_init_plug(struct zram *zram,
 		iowork->io_buf.pool = &iowork->data.page_pool;
 		break;
 	case HYB_FAULT_OUT:
-		io_para.complete_notify = hybridswap_fault_io_release;
+		/*
+		 * This class' io_work_arg is the faulting task's stack
+		 * frame and is still in use when hybridswap_plug_finish()
+		 * returns, so the release must never dereference it.  The
+		 * table reference is owned by the req (io_para.infos) and
+		 * is dropped there instead.  Nothing else in this driver
+		 * reads io_para.private, so clear it and keep the dangling
+		 * stack address out of the heap request.
+		 */
+		io_para.complete_notify = NULL;
+		io_para.private = NULL;
 		iowork->io_buf.pool = NULL;
 		break;
 	default:

@@ -223,6 +223,7 @@ struct hybridswap_entry {
 	void *manager_private;
 };
 
+struct hyb_info;
 struct hybridswap_io_req;
 struct hybridswap_io {
 	struct block_device *bdev;
@@ -231,6 +232,14 @@ struct hybridswap_io {
 	void (*complete_notify)(void *);
 	void *private;
 	struct hybridswap_key_point_record *record;
+	/*
+	 * Table reference owned by the request.  It is dropped by
+	 * hybridswap_io_req_release() rather than by a completion
+	 * notify, because the io_work_arg of the FAULT_OUT class lives
+	 * on the faulting task's stack and must never be read from the
+	 * end-io workqueue.
+	 */
+	struct hyb_info *infos;
 };
 
 struct hybridswap_io_req {
