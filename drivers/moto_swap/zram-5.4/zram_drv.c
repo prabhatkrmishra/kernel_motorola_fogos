@@ -81,6 +81,7 @@ static bool zram_wait_slot_inflight(struct zram *zram, u32 index)
 {
 	unsigned long *flagsp = &zram->table[index].flags;
 	unsigned long inflight = BIT(ZRAM_UNDER_WB);
+	ktime_t start = ktime_get();
 	int retries = 0;
 
 	/*
@@ -102,8 +103,25 @@ static bool zram_wait_slot_inflight(struct zram *zram, u32 index)
 		if (!(*flagsp & inflight))
 			break;
 		if (++retries >= 2) {
-			/* Completer is stuck or gone; degrade loudly. */
+			/*
+			 * Completer is stuck or gone; degrade loudly.
+			 *
+			 * The log line is the durable half of this. The
+			 * counter lives in zram->stats, which
+			 * zram_reset_device_locked() zeroes, so a device
+			 * that is reset afterwards keeps no tally while
+			 * the line survives in the ring buffer. Printed
+			 * with the slot lock held and without taking a
+			 * lock of its own, because the only locks in
+			 * reach from here are ones this path already
+			 * holds.
+			 */
 			WARN_ON_ONCE(1);
+			atomic64_inc(&zram->stats.slot_stuck);
+			pr_info("zram %s: slot %u still claimed after %lld us, flags 0x%lx (inflight mask 0x%lx)\n",
+				zram->disk->disk_name, index,
+				ktime_us_delta(ktime_get(), start),
+				*flagsp, inflight);
 			return false;
 		}
 	}

@@ -31,6 +31,9 @@ extern bool hybridswap_zram_bound(struct zram *zram);
 extern int hybridswap_page_fault(struct zram *zram, u32 index);
 extern bool hybridswap_delete(struct zram *zram, u32 index);
 
+/* Slot waits that gave up with a completer still holding the slot. */
+extern atomic64_t hybridswap_slot_stuck;
+
 extern ssize_t hybridswap_report_show(struct device *dev,
 		struct device_attribute *attr, char *buf);
 extern ssize_t hybridswap_stat_snap_show(struct device *dev,

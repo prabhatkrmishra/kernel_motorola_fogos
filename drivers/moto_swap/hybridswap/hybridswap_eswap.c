@@ -222,6 +222,15 @@ static const char *fg_bg[2] = {"BG", "FG"};
 bool hyb_io_work_begin_flag;
 struct hybridswap_cfg global_settings;
 
+/*
+ * Slot waits that gave up with a completer still holding the slot, from
+ * hybridswap_untrack(). Module scope rather than per-memcg like the
+ * eswapent counters: the anomaly is a zram slot, not a memcg, and the
+ * untrack path has no memcg to hand without walking the grade list from
+ * inside a slot lock.
+ */
+atomic64_t hybridswap_slot_stuck;
+
 static u8 hybridswap_io_key[HYBRIDSWAP_KEY_SIZE];
 static struct workqueue_struct *hybridswap_proc_read_workqueue;
 static struct workqueue_struct *hybridswap_proc_write_workqueue;
@@ -5151,6 +5160,7 @@ out:
 bool hybridswap_untrack(struct zram *zram, u32 index)
 {
 	struct hyb_info *infos;
+	ktime_t start = ktime_get();
 	int retries;
 
 	if (!hybridswap_core_enabled())
@@ -5179,8 +5189,25 @@ bool hybridswap_untrack(struct zram *zram, u32 index)
 		      zram_test_flag(zram, index, ZRAM_BATCHING_OUT)))
 			break;
 		if (++retries >= 2) {
-			/* Completer is stuck or gone; degrade loudly. */
+			/*
+			 * Completer is stuck or gone; degrade loudly.
+			 *
+			 * Both bits are printed rather than just the
+			 * mask, so the log says which of the two a stuck
+			 * fetch left behind - ZRAM_UNDER_WB is the shrink
+			 * writeback and ZRAM_BATCHING_OUT the fault-out
+			 * fetch, and they have different owners. No lock
+			 * is taken here: the slot lock is held across this
+			 * return, and the give-up is already on a path
+			 * where sleeping is what just failed.
+			 */
 			WARN_ON_ONCE(1);
+			atomic64_inc(&hybridswap_slot_stuck);
+			pr_info("hybridswap: zram %s slot %u still claimed after %lld us, ZRAM_UNDER_WB=%d ZRAM_BATCHING_OUT=%d\n",
+				zram->disk->disk_name, index,
+				ktime_us_delta(ktime_get(), start),
+				!!zram_test_flag(zram, index, ZRAM_UNDER_WB),
+				!!zram_test_flag(zram, index, ZRAM_BATCHING_OUT));
 			hyb_info_put(infos);
 			return false;
 		}
