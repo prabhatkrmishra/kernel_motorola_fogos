@@ -243,7 +243,7 @@ struct fpc1020_data {
 	struct notifier_block nb;
 	int irq_gpio;
 	int irq_num;
-	unsigned int irq_cnt;
+	atomic_t irq_cnt;
 	int rst_gpio;
 	int pwr_gpio;
 	int power_enabled;
@@ -407,7 +407,7 @@ static ssize_t irq_cnt_get(struct device *device,
 {
 	struct fpc1020_data *fpc1020 = dev_get_drvdata(device);
 
-	return scnprintf(buffer, PAGE_SIZE, "%u\n", fpc1020->irq_cnt);
+	return scnprintf(buffer, PAGE_SIZE, "%d\n", atomic_read(&fpc1020->irq_cnt));
 }
 static DEVICE_ATTR(irq_cnt, S_IRUSR, irq_cnt_get, NULL);
 
@@ -459,7 +459,7 @@ static irqreturn_t fpc1020_irq_handler(int irq, void *handle)
 
 	pm_wakeup_event(fpc1020->dev, MAX_UP_TIME);
 	dev_dbg(fpc1020->dev, "%s\n", __func__);
-	fpc1020->irq_cnt++;
+	atomic_inc(&fpc1020->irq_cnt);
 #ifdef CONFIG_INPUT_MISC_FPC1020_SAVE_TO_CLASS_DEVICE
 	sysfs_notify(&fpc1020->class_dev->kobj, NULL, dev_attr_irq.attr.name);
 #else
@@ -751,7 +751,7 @@ static int fpc1020_probe(struct platform_device *pdev)
 		goto exit;
 	}
 
-	fpc1020->irq_cnt = 0;
+	atomic_set(&fpc1020->irq_cnt, 0);
 	irqf = IRQF_TRIGGER_RISING | IRQF_ONESHOT;
 
 	rc = devm_request_threaded_irq(dev, gpio_to_irq(fpc1020->irq_gpio),
