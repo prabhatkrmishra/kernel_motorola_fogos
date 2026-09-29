@@ -38,8 +38,6 @@ static char *profile_name[AW_PROFILE_MAX] = {
 		"Lowpower", "Bypass", "Mmi", "Fm", "Notification", "Receiver"
 	};
 
-static char ext_dsp_prof_write = AW_EXT_DSP_WRITE_NONE;
-static DEFINE_MUTEX(g_ext_dsp_prof_wr_lock); /*lock ext wr flag*/
 static unsigned int g_fade_in_time = AW_1000_US / 10;
 
 static unsigned int g_fade_out_time = AW_1000_US >> 1;
@@ -1441,9 +1439,6 @@ int aw_dev_set_profile_index(struct aw_device *aw_dev, int index)
 		aw_dev_info(aw_dev->dev, "set prof[%s]",
 			profile_name[aw_dev->prof_info.prof_desc[index].id]);
 	}
-	mutex_lock(&g_ext_dsp_prof_wr_lock);
-	ext_dsp_prof_write = AW_EXT_DSP_WRITE_NONE;
-	mutex_unlock(&g_ext_dsp_prof_wr_lock);
 
 	return 0;
 }
@@ -1799,7 +1794,6 @@ int aw_device_stop(struct aw_device *aw_dev)
 	/*set power down*/
 	aw_dev_pwd(aw_dev, true);
 
-	ext_dsp_prof_write = AW_EXT_DSP_WRITE_NONE;
 	aw_dev_info(aw_dev->dev, "done");
 	return 0;
 }
