@@ -22,6 +22,7 @@
 #include <linux/platform_device.h>
 #include <linux/notifier.h>
 #include <linux/kref.h>
+#include <linux/bitmap.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
 
@@ -234,6 +235,9 @@ struct fpc1020_data {
 	struct device *dev;
 #ifdef CONFIG_INPUT_MISC_FPC1020_SAVE_TO_CLASS_DEVICE
 	struct device *class_dev;
+	/* device number and region minor this instance owns */
+	dev_t class_devno;
+	int class_minor;
 #endif
 	struct platform_device *pdev;
 	struct notifier_block nb;
@@ -501,46 +505,120 @@ static int fpc1020_request_named_gpio(struct fpc1020_data *fpc1020,
 #ifdef CONFIG_INPUT_MISC_FPC1020_SAVE_TO_CLASS_DEVICE
 #define MAX_INSTANCE	5
 #define MAJOR_BASE	32
-static int fpc1020_create_sysfs(struct fpc1020_data *fpc1020, bool create) {
+
+/*
+ * The character-device region and the class are module-wide, not
+ * per-instance, and each instance takes one distinct minor out of them.
+ * Previously alloc_chrdev_region() ran on every create, so a second
+ * instance reserved a second range and overwrote the shared dev_no, and
+ * teardown destroyed the shared class and released one of the five
+ * minors the allocation had reserved.  One region, allocated on the
+ * first instance and released on the last, with a bitmap recording
+ * which minors are taken, keeps instance A's removal from taking
+ * anything instance B is still using.
+ */
+static DEFINE_MUTEX(fpc1020_class_lock);
+static struct class *fingerprint_class;
+static dev_t fpc1020_region;
+static unsigned long fpc1020_minor_taken;
+static unsigned int fpc1020_instance_count;
+
+static int fpc1020_create_sysfs(struct fpc1020_data *fpc1020, bool create)
+{
 	struct device *dev = fpc1020->dev;
-	static struct class *fingerprint_class;
-	static dev_t dev_no;
 	int rc = 0;
+	int minor;
+
+	mutex_lock(&fpc1020_class_lock);
 
 	if (create) {
-		rc = alloc_chrdev_region(&dev_no, MAJOR_BASE, MAX_INSTANCE, "fpc");
-		if (rc < 0) {
-			dev_err(dev, "%s alloc fingerprint class device MAJOR failed.\n", __func__);
-			goto ALLOC_REGION;
-		}
-		if (!fingerprint_class) {
+		if (fpc1020_instance_count == 0) {
+			rc = alloc_chrdev_region(&fpc1020_region, MAJOR_BASE,
+						  MAX_INSTANCE, "fpc");
+			if (rc < 0) {
+				dev_err(dev,
+					"%s alloc fingerprint region failed.\n",
+					__func__);
+				goto out_unlock;
+			}
+
 			fingerprint_class = class_create(THIS_MODULE, "fingerprint");
 			if (IS_ERR(fingerprint_class)) {
-				dev_err(dev, "%s create fingerprint class failed.\n", __func__);
 				rc = PTR_ERR(fingerprint_class);
 				fingerprint_class = NULL;
-				goto CLASS_CREATE_ERR;
+				goto unregister_region;
 			}
 		}
-		fpc1020->class_dev = device_create_with_groups(fingerprint_class, NULL,
-				MAJOR(dev_no), fpc1020, attribute_groups, "fpc1020");
+
+		minor = find_first_zero_bit(&fpc1020_minor_taken, MAX_INSTANCE);
+		if (minor >= MAX_INSTANCE) {
+			dev_err(dev, "%s no free minor left\n", __func__);
+			rc = -ENODEV;
+			goto release_class;
+		}
+		__set_bit(minor, &fpc1020_minor_taken);
+
+		fpc1020->class_minor = minor;
+		fpc1020->class_devno = MKDEV(MAJOR(fpc1020_region), minor);
+
+		fpc1020->class_dev = device_create_with_groups(fingerprint_class,
+				NULL, fpc1020->class_devno, fpc1020,
+				attribute_groups, "fpc1020");
 		if (IS_ERR(fpc1020->class_dev)) {
-			dev_err(dev, "%s create fingerprint class device failed.\n", __func__);
+			dev_err(dev, "%s create fingerprint class device failed.\n",
+				__func__);
 			rc = PTR_ERR(fpc1020->class_dev);
 			fpc1020->class_dev = NULL;
-			goto DEVICE_CREATE_ERR;
+			__clear_bit(minor, &fpc1020_minor_taken);
+			goto release_class;
 		}
-		return 0;
+
+		fpc1020_instance_count++;
+		goto out_unlock;
 	}
 
-	device_destroy(fingerprint_class, MAJOR(dev_no));
-	fpc1020->class_dev = NULL;
-DEVICE_CREATE_ERR:
-	class_destroy(fingerprint_class);
-	fingerprint_class = NULL;
-CLASS_CREATE_ERR:
-	unregister_chrdev_region(dev_no, 1);
-ALLOC_REGION:
+	/*
+	 * Teardown.  Only ever destroys what this instance created: its
+	 * own device node and its own minor.  The class and the region go
+	 * away with the last instance, not the first.
+	 */
+	if (fpc1020->class_dev) {
+		device_destroy(fingerprint_class, fpc1020->class_devno);
+		fpc1020->class_dev = NULL;
+	}
+	/*
+	 * The count is decremented only by an instance that actually holds
+	 * a minor, so a repeated teardown is idempotent.  class_dev and
+	 * class_minor already were, but decrementing unconditionally would
+	 * have let a second call drive the count to zero and take the class
+	 * and region away from a live peer.
+	 */
+	if (fpc1020->class_minor >= 0 && fpc1020->class_minor < MAX_INSTANCE) {
+		__clear_bit(fpc1020->class_minor, &fpc1020_minor_taken);
+		fpc1020->class_minor = -1;
+		if (fpc1020_instance_count)
+			fpc1020_instance_count--;
+	}
+
+	if (fpc1020_instance_count == 0) {
+		class_destroy(fingerprint_class);
+		fingerprint_class = NULL;
+		goto unregister_region;
+	}
+	goto out_unlock;
+
+release_class:
+	if (fpc1020_instance_count == 0 && fingerprint_class) {
+		class_destroy(fingerprint_class);
+		fingerprint_class = NULL;
+	}
+unregister_region:
+	if (fpc1020_instance_count == 0 && MAJOR(fpc1020_region)) {
+		unregister_chrdev_region(fpc1020_region, MAX_INSTANCE);
+		fpc1020_region = 0;
+	}
+out_unlock:
+	mutex_unlock(&fpc1020_class_lock);
 	return rc;
 }
 #endif
@@ -569,6 +647,9 @@ static int fpc1020_probe(struct platform_device *pdev)
 	}
 
 	fpc1020->dev = dev;
+#ifdef CONFIG_INPUT_MISC_FPC1020_SAVE_TO_CLASS_DEVICE
+	fpc1020->class_minor = -1;
+#endif
 	dev_set_drvdata(dev, fpc1020);
 	fpc1020->pdev = pdev;
 	fpc1020->power_enabled = 0;
