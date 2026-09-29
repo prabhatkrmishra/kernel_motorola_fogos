@@ -853,7 +853,15 @@ int32_t aw9610x_init(struct aw_sar *p_sar)
 		return -AW_ERR;
 	}
 
+	/*
+	 * Only aw9610x_set_active_cmd() reads this, and only under
+	 * AW9610X_TVS_ABNORMAL_CAIL.  Assigning it unconditionally left the
+	 * global written and never read in the common build, which a newer
+	 * compiler reports as a set-but-unused global.
+	 */
+#ifdef AW9610X_TVS_ABNORMAL_CAIL
 	g_aw_sar = p_sar;
+#endif
 
 	p_sar->priv_data = devm_kzalloc(p_sar->dev, sizeof(struct aw9610x), GFP_KERNEL);
 	if (p_sar->priv_data == NULL) {

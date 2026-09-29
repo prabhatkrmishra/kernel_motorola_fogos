@@ -44,7 +44,6 @@
 static unsigned int g_aw882xx_dev_cnt = 0;
 static unsigned int g_print_dbg = 0;
 static unsigned int g_algo_rx_en = false;
-static unsigned int g_algo_tx_en = false;
 static unsigned int g_algo_copp_en = false;
 #ifdef AW_SPIN_ENABLE
 static unsigned int g_spin_value = 0;
@@ -1234,7 +1233,6 @@ static int aw882xx_set_tx_en(struct snd_kcontrol *kcontrol,
 	if (ret)
 		aw_dev_err(aw882xx->dev, "dsp_msg error, ret=%d", ret);
 
-	g_algo_tx_en = ctrl_value;
 	aw_dev_info(aw882xx->dev, "set value %d", ctrl_value);
 	return 0;
 }
@@ -1264,7 +1262,7 @@ static int aw882xx_get_tx_en(struct snd_kcontrol *kcontrol,
 		}
 		ucontrol->value.integer.value[0] = ctrl_value;
 	} else {
-		ucontrol->value.integer.value[0] = false;//g_algo_tx_en;
+		ucontrol->value.integer.value[0] = false;
 		aw_dev_info(aw882xx->dev, "no stream, tx disable");
 	}
 
