@@ -246,6 +246,9 @@ struct fpc1020_data {
 	atomic_t irq_cnt;
 	int rst_gpio;
 	int pwr_gpio;
+	/* serialises the regulator/gpio power transition; see
+	 * fpc1020_power_on() */
+	struct mutex power_lock;
 	int power_enabled;
 	unsigned int  rgltr_ctrl_support; //whether regulator control is supported
 	struct regulator *pwr_supply;
@@ -253,15 +256,29 @@ struct fpc1020_data {
 	int pwr_load[1];
 };
 
+/*
+ * Serialised by fpc1020->power_lock.  Both are reached from process
+ * context only - probe, remove, and the hw_reset sysfs write - and
+ * neither calls the other, so a sleepable mutex is safe and there is no
+ * recursive path onto it.  power_enabled is read and written only under
+ * it, which is what makes a second concurrent enable or disable a no-op
+ * rather than a double regulator_enable().
+ */
 static int fpc1020_power_on(struct fpc1020_data *fpc1020)
 {
 	int rc = 0;
 	if(!fpc1020) return 0;
 
+	mutex_lock(&fpc1020->power_lock);
 	if (!fpc1020->power_enabled) {
 		if(fpc1020->rgltr_ctrl_support && !IS_ERR_OR_NULL(fpc1020->pwr_supply)) {
 			rc = regulator_enable(fpc1020->pwr_supply);
-			pr_warn(" %s : enable  pwr_supply return %d \n", __func__, rc);
+			if (rc)
+				dev_err(fpc1020->dev,
+					"%s: regulator_enable failed %d\n",
+					__func__, rc);
+			else
+				pr_debug("%s: pwr_supply enabled\n", __func__);
 		}
 		if (gpio_is_valid(fpc1020->pwr_gpio)) {
 			gpio_direction_output(fpc1020->pwr_gpio, 1);
@@ -273,6 +290,7 @@ static int fpc1020_power_on(struct fpc1020_data *fpc1020)
 			}
 		}
 	}
+	mutex_unlock(&fpc1020->power_lock);
 	return rc;
 }
 
@@ -280,16 +298,24 @@ int fpc1020_power_off(struct fpc1020_data *fpc1020)
 {
 	int rc = 0;
 	if(!fpc1020) return 0;
+
+	mutex_lock(&fpc1020->power_lock);
 	if (fpc1020->power_enabled) {
 		if (fpc1020->rgltr_ctrl_support  && !IS_ERR_OR_NULL(fpc1020->pwr_supply)) {
 			rc = regulator_disable(fpc1020->pwr_supply);
-			pr_warn(" %s : disable  pwr_supply return %d \n", __func__, rc);
+			if (rc)
+				dev_err(fpc1020->dev,
+					"%s: regulator_disable failed %d\n",
+					__func__, rc);
+			else
+				pr_debug("%s: pwr_supply disabled\n", __func__);
 		}
 		if (gpio_is_valid(fpc1020->pwr_gpio)) {
 			gpio_direction_output(fpc1020->pwr_gpio, 0);
 		}
 		fpc1020->power_enabled = 0;
 	}
+	mutex_unlock(&fpc1020->power_lock);
 	return rc;
 }
 
@@ -652,6 +678,7 @@ static int fpc1020_probe(struct platform_device *pdev)
 #endif
 	dev_set_drvdata(dev, fpc1020);
 	fpc1020->pdev = pdev;
+	mutex_init(&fpc1020->power_lock);
 	fpc1020->power_enabled = 0;
 	fpc1020->pwr_supply = NULL;
 	if (!np) {
