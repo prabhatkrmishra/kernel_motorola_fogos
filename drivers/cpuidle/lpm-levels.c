@@ -362,11 +362,11 @@ static void histtimer_cancel(void)
 	struct hrtimer *cpu_histtimer = &per_cpu(histtimer, cpu);
 	ktime_t time_rem;
 
+	rcu_read_lock();
 	time_rem = hrtimer_get_remaining(cpu_histtimer);
-	if (ktime_to_us(time_rem) <= 0)
-		return;
-
-	hrtimer_try_to_cancel(cpu_histtimer);
+	if (ktime_to_us(time_rem) > 0)
+		hrtimer_try_to_cancel(cpu_histtimer);
+	rcu_read_unlock();
 }
 
 static enum hrtimer_restart histtimer_fn(struct hrtimer *h)
@@ -385,8 +385,22 @@ static void histtimer_start(uint32_t time_us)
 	unsigned int cpu = raw_smp_processor_id();
 	struct hrtimer *cpu_histtimer = &per_cpu(histtimer, cpu);
 
+	/*
+	 * The hrtimer start/cancel tracepoints assert that their caller is
+	 * in an RCU read-side section (__DECLARE_TRACE in
+	 * include/linux/tracepoint.h), and these run from the idle path,
+	 * which is not.  The assertion only compiles in under
+	 * CONFIG_LOCKDEP, so it went unnoticed until lockdep was turned on
+	 * for this build.
+	 *
+	 * The read-side is held across the hrtimer call only, never across
+	 * cpu_do_idle(): holding one there would stall preempted RCU
+	 * readers for the length of every idle period.
+	 */
+	rcu_read_lock();
 	cpu_histtimer->function = histtimer_fn;
 	hrtimer_start(cpu_histtimer, hist_ktime, HRTIMER_MODE_REL_PINNED);
+	rcu_read_unlock();
 }
 
 static void cluster_timer_init(struct lpm_cluster *cluster)
@@ -412,6 +426,7 @@ static void clusttimer_cancel(void)
 	struct lpm_cluster *cluster = per_cpu(cpu_lpm, cpu)->parent;
 	ktime_t time_rem;
 
+	rcu_read_lock();
 	time_rem = hrtimer_get_remaining(&cluster->histtimer);
 	if (ktime_to_us(time_rem) > 0)
 		hrtimer_try_to_cancel(&cluster->histtimer);
@@ -420,11 +435,10 @@ static void clusttimer_cancel(void)
 		time_rem = hrtimer_get_remaining(
 			&cluster->parent->histtimer);
 
-		if (ktime_to_us(time_rem) <= 0)
-			return;
-
-		hrtimer_try_to_cancel(&cluster->parent->histtimer);
+		if (ktime_to_us(time_rem) > 0)
+			hrtimer_try_to_cancel(&cluster->parent->histtimer);
 	}
+	rcu_read_unlock();
 }
 
 static enum hrtimer_restart clusttimer_fn(struct hrtimer *h)
@@ -441,9 +455,11 @@ static void clusttimer_start(struct lpm_cluster *cluster, uint32_t time_us)
 	uint64_t time_ns = time_us * NSEC_PER_USEC;
 	ktime_t clust_ktime = ns_to_ktime(time_ns);
 
+	rcu_read_lock();
 	cluster->histtimer.function = clusttimer_fn;
 	hrtimer_start(&cluster->histtimer, clust_ktime,
 				HRTIMER_MODE_REL_PINNED);
+	rcu_read_unlock();
 }
 
 static void biastimer_cancel(void)
@@ -452,11 +468,11 @@ static void biastimer_cancel(void)
 	struct hrtimer *cpu_biastimer = &per_cpu(biastimer, cpu);
 	ktime_t time_rem;
 
+	rcu_read_lock();
 	time_rem = hrtimer_get_remaining(cpu_biastimer);
-	if (ktime_to_us(time_rem) <= 0)
-		return;
-
-	hrtimer_try_to_cancel(cpu_biastimer);
+	if (ktime_to_us(time_rem) > 0)
+		hrtimer_try_to_cancel(cpu_biastimer);
+	rcu_read_unlock();
 }
 
 static enum hrtimer_restart biastimer_fn(struct hrtimer *h)
@@ -470,8 +486,10 @@ static void biastimer_start(uint32_t time_ns)
 	unsigned int cpu = raw_smp_processor_id();
 	struct hrtimer *cpu_biastimer = &per_cpu(biastimer, cpu);
 
+	rcu_read_lock();
 	cpu_biastimer->function = biastimer_fn;
 	hrtimer_start(cpu_biastimer, bias_ktime, HRTIMER_MODE_REL_PINNED);
+	rcu_read_unlock();
 }
 
 static uint64_t find_deviation(int *interval, uint32_t ref_stddev,
