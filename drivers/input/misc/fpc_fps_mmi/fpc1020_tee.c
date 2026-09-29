@@ -23,8 +23,8 @@
 #include <linux/notifier.h>
 #include <linux/kref.h>
 #include <linux/bitmap.h>
+#include <linux/string.h>
 #include <linux/list.h>
-#include <linux/mutex.h>
 
 #define RESET_LOW_SLEEP_MIN_US 5000
 #define RESET_LOW_SLEEP_MAX_US (RESET_LOW_SLEEP_MIN_US + 100)
@@ -407,12 +407,23 @@ static ssize_t dev_enable_set(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct  fpc1020_data *fpc1020 = dev_get_drvdata(dev);
+	bool state;
+	int rc;
 
-	int state = (*buf == '1') ? 1 : 0;
+	/*
+	 * kstrtobool() rather than testing *buf == '1', which treated every
+	 * input that was not literally '1' as "disable" - a typo, an empty
+	 * write or a stray newline silently switched the sensor off.  It
+	 * also handles the trailing newline that a shell echo leaves on the
+	 * buffer, and rejects anything it does not recognise.
+	 */
+	rc = kstrtobool(buf, &state);
+	if (rc)
+		return rc;
 
 	FPS_notify(0xbeef, state);
 	dev_dbg(fpc1020->dev, "%s state = %d\n", __func__, state);
-	return 1;
+	return count;
 }
 static DEVICE_ATTR(dev_enable, S_IWUSR | S_IWGRP, NULL, dev_enable_set);
 
