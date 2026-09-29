@@ -20,6 +20,8 @@
 #include <linux/version.h>
 #include <linux/wait_bit.h>
 #include <linux/lockdep.h>
+#include <linux/percpu-refcount.h>
+#include <linux/completion.h>
 
 #ifdef CONFIG_ZRAM_5_4
 #include "../zram-5.4/zram_drv.h"
@@ -88,6 +90,46 @@ struct hybridswap_cfg {
 
 	atomic_t dev_life;
 	unsigned long quota_day;
+
+	/*
+	 * In-flight I/O chains, and the teardown handshake built on them.
+	 *
+	 * Every context that can reach the loop device takes a reference in
+	 * hybridswap_init_plug() and drops it in hybridswap_plug_finish(),
+	 * with percpu_ref_tryget_live() so that a reference cannot be taken
+	 * once the teardown has killed the refcount.  That is the whole
+	 * point of using percpu_ref here rather than a lock: percpu_ref_kill()
+	 * is non-blocking and usable from atomic context, it excludes new
+	 * users on its own, and - via the release callback - it tells the
+	 * teardown exactly when the last pre-existing user has finished.
+	 * A lock would give the same exclusion but would have to be
+	 * acquired with a timed trylock loop, because the users below hold
+	 * it across an I/O wait that can be arbitrarily long.
+	 *
+	 * io_quiesced is completed by hybridswap_io_release() and waited on
+	 * by the teardown.  Per the percpu_ref rules the release callback
+	 * is the only thing that means "all users are gone" - percpu_ref_
+	 * is_zero() must not be polled for that, since it can read zero
+	 * while the internal switch routines are still running.
+	 */
+	struct percpu_ref io_refs;
+	struct completion io_quiesced;
+
+	/*
+	 * Set by the teardown alongside percpu_ref_kill_and_confirm().
+	 *
+	 * Killing the refcount stops new users but does not wake one that is
+	 * already asleep: hybridswap_wait_io_finish() sits in an unbounded
+	 * wait_event_timeout() retry, and a wedged loop device means the
+	 * condition it is waiting for never becomes true, so it would hold
+	 * its reference - and the teardown with it, since zram_remove() is
+	 * holding zram->init_lock and the claim - for good.  This flag is
+	 * what the wait condition tests so that an in-flight chain gives up
+	 * and drops its reference.  The wait already polls every 10-100ms,
+	 * so the reaction is bounded by that interval without needing every
+	 * waitqueue to be woken explicitly.
+	 */
+	atomic_t io_kill;
 };
 
 struct async_req {
@@ -241,6 +283,46 @@ struct hybridswap_cfg global_settings;
  * inside a slot lock.
  */
 atomic64_t hybridswap_slot_stuck;
+
+/*
+ * percpu_ref release callback: runs once, after percpu_ref_kill_and_confirm()
+ * has been called and every in-flight I/O chain has dropped its reference.
+ *
+ * This is the only correct signal that the teardown may proceed.
+ * percpu_ref_is_zero() must not be polled for it - it can read zero while
+ * percpu_ref's own switch routines are still running - so the teardown
+ * waits on the completion this signals instead.
+ *
+ * It runs in the RCU/workqueue context percpu_ref uses to retire the
+ * per-cpu counters, so it may block and free.
+ */
+static void hybridswap_io_release(struct percpu_ref *ref)
+{
+	complete(&global_settings.io_quiesced);
+}
+
+/*
+ * Bios handed to the loop device and not yet completed.  The per-request
+ * eswap_doing counter cannot serve the teardown: it is reachable only
+ * through a struct hybridswap_io_req the teardown does not have, and it
+ * counts pages rather than outstanding bios.  This one is module scope
+ * precisely so the teardown can wait on it.
+ */
+static atomic_t hybridswap_bio_inflight = ATOMIC_INIT(0);
+static DECLARE_WAIT_QUEUE_HEAD(hybridswap_bio_idle_wq);
+
+/*
+ * How long the teardown waits for outstanding bios before giving up and
+ * leaving the device bound.  Generous, because the common case is an idle
+ * device that satisfies it immediately; it exists to bound the
+ * pathological case, not to pace anything.  The wait for in-flight I/O
+ * chains is not bounded this way - it is bounded by the io_kill flag
+ * being observed by the two polls in hybridswap_wait_io_finish() and
+ * hybridswap_limit_doing(), which is what makes those, and the
+ * flush_workqueue() that depends on them, terminate.
+ */
+#define HYBRIDSWAP_TEARDOWN_TIMEOUT	(10 * HZ)
+
 
 static u8 hybridswap_io_key[HYBRIDSWAP_KEY_SIZE];
 static struct workqueue_struct *hybridswap_proc_read_workqueue;
@@ -819,7 +901,8 @@ static void hybridswap_limit_doing(struct hybridswap_io_req *req)
 			hybp(HYB_DEBUG, "wait doing start\n");
 			ret = wait_event_timeout(req->io_wait,
 					atomic_read(&req->eswap_doing) <
-					HYBRIDSWAP_MAX_INFILGHT_NUM,
+					HYBRIDSWAP_MAX_INFILGHT_NUM ||
+					atomic_read(&global_settings.io_kill),
 					msecs_to_jiffies(100));
 		} while (!ret);
 	}
@@ -835,8 +918,20 @@ static void hybridswap_wait_io_finish(struct hybridswap_io_req *req)
 
 	if (req->io_para.class == HYB_FAULT_OUT) {
 		hybp(HYB_DEBUG, "fault out wait finish start\n");
-		wait_for_completion_io_timeout(&req->io_end_flag,
-				MAX_SCHEDULE_TIMEOUT);
+		/*
+		 * Bounded polling rather than a single MAX_SCHEDULE_TIMEOUT
+		 * wait, for the same reason as the loop below: the faulting
+		 * task must not be unkillable while it holds a reference, and
+		 * it is the one holder that is not a reclaim worker the
+		 * teardown could simply be waited out on.
+		 */
+		while (!wait_for_completion_timeout(&req->io_end_flag,
+				msecs_to_jiffies(HYBRIDSWAP_READ_TIME))) {
+			if (atomic_read(&global_settings.io_kill)) {
+				hybp(HYB_WARN, "fault out wait abandoned\n");
+				break;
+			}
+		}
 
 		return;
 	}
@@ -844,10 +939,36 @@ static void hybridswap_wait_io_finish(struct hybridswap_io_req *req)
 	wait_time = (req->io_para.class == HYB_RECLAIM_IN) ?
 		HYBRIDSWAP_WRITE_TIME : HYBRIDSWAP_READ_TIME;
 
+	/*
+	 * The io_kill test is what makes this wait abortable, and without it
+	 * there can be no teardown at all.
+	 *
+	 * This is a do/while with no attempt limit: it retries for as long as
+	 * eswap_doing stays non-zero, and eswap_doing only drops when a bio
+	 * completes on the loop device.  So a wedged backing device parks
+	 * this task here for ever, holding a reference on the I/O chain -
+	 * and, before this flag existed, the lock that reference implied.
+	 * A teardown that had to wait for that reference would therefore
+	 * never return, while holding zram->init_lock and the device claim.
+	 *
+	 * percpu_ref_kill_and_confirm() alone does not help: it stops new
+	 * users acquiring a reference, but this one is already held, and
+	 * dropping it is what waits for the kill.  The flag is the
+	 * other half, giving a holder a reason to let go.  The wait already
+	 * polls, so the reaction is bounded by HYBRIDSWAP_READ_TIME or
+	 * HYBRIDSWAP_WRITE_TIME rather than needing every io_wait to be
+	 * woken explicitly.
+	 *
+	 * Bailing out leaves this request's I/O outstanding.  That is safe
+	 * only because the teardown drains the bios separately before it
+	 * destroys anything they touch, and because the segment and request
+	 * are kept alive by the krefs the completion path drops.
+	 */
 	do {
 		hybp(HYB_DEBUG, "wait finish start\n");
 		ret = wait_event_timeout(req->io_wait,
-			(!atomic_read(&req->eswap_doing)),
+			(!atomic_read(&req->eswap_doing) ||
+			 atomic_read(&global_settings.io_kill)),
 			msecs_to_jiffies(wait_time));
 	} while (!ret);
 }
@@ -1002,6 +1123,17 @@ static void hybridswap_end_io(struct bio *bio)
 
 	if (unlikely(!segment || !(segment->req))) {
 		hybp(HYB_ERR, "segment or req null\n");
+		/*
+		 * Not reachable for a bio this driver submitted, which always
+		 * sets bi_private to a segment with a request first, but the
+		 * inflight count has to be released on every path out of here
+		 * or the teardown's wait never completes.  Whether the count
+		 * was actually incremented cannot be told from here, so it is
+		 * not decremented blindly: the count is per submitted bio, and
+		 * a bio that never reached hybridswap_submit_bio() was never
+		 * counted.  A NULL here means exactly that, so the correct
+		 * handling is to leave the count alone.
+		 */
 		bio_put(bio);
 
 		return;
@@ -1018,8 +1150,23 @@ static void hybridswap_end_io(struct bio *bio)
 	segment->time.end_io = ktime_get();
 	segment->bio_result = bio->bi_status;
 
+	/*
+	 * workqueue is non-NULL here because the teardown waits for the
+	 * inflight count to reach zero before it destroys these workqueues,
+	 * and no new chain can be started once the I/O refcount has been
+	 * killed.  Both submitters and outstanding completions are
+	 * therefore accounted for by the time either can go away, and this
+	 * queue_work() cannot be handed a NULL.  There is deliberately no
+	 * fallback drop here: reproducing what hybridswap_io_end_work() does
+	 * - the success path, the hybridswap_errio_proc() path, the table
+	 * reference, the nice restore - is exactly the accounting this
+	 * ordering exists to make unnecessary.
+	 */
 	queue_work(workqueue, &segment->stopio_work);
 	bio_put(bio);
+
+	if (atomic_dec_and_test(&hybridswap_bio_inflight))
+		wake_up_all(&hybridswap_bio_idle_wq);
 }
 
 static bool hybridswap_eswap_merge_back(
@@ -1172,6 +1319,17 @@ int hybridswap_submit_bio(struct hyb_sgm *segment)
 	segment->time.submit_bio = ktime_get();
 
 	hybperfiowrkstart(record, HYB_SUBMIT_BIO);
+	/*
+	 * Counted across submit_bio() and its completion, so the teardown
+	 * can wait for every bio to have come back before it tears down the
+	 * workqueues hybridswap_end_io() queues onto.  The increment is on
+	 * the submit side and the decrement runs in the loop driver's
+	 * completion context, so what orders them is the teardown: it kills
+	 * the I/O refcount first, so no chain can submit after the drain
+	 * starts, and only bios already handed to the device remain to be
+	 * counted.
+	 */
+	atomic_inc(&hybridswap_bio_inflight);
 	submit_bio(bio);
 	hybperfiowrkend(record, HYB_SUBMIT_BIO);
 
@@ -1425,6 +1583,14 @@ int hybridswap_plug_finish(void *iohandle)
 		req->segment_cnt);
 
 	kref_put(&req->refcount, hybridswap_io_req_release);
+
+	/*
+	 * Matching drop for the reference hybridswap_init_plug() took.  Every
+	 * successful init_plug() has exactly one plug_finish(), so this is
+	 * the only place the reference can come back off.  The last drop
+	 * runs hybridswap_io_release() and completes the teardown's wait.
+	 */
+	percpu_ref_put(&global_settings.io_refs);
 
 	hybp(HYB_DEBUG, "io schedule finish succ\n");
 
@@ -2658,6 +2824,16 @@ void hybridswap_manager_memcg_init(struct zram *zram,
 {
 	memcg_hybs_t *hybs;
 
+	/*
+	 * zram->infos and the hybs->zram publish are serialised against
+	 * hybridswap_manager_deinit() by the caller's hybs->zram_init_lock,
+	 * which that function takes for the same clear - so the test and
+	 * the publish are atomic with respect to the teardown's walk, and
+	 * a caller that sees a non-NULL infos here is guaranteed either to
+	 * publish before the teardown's clear or to find it already NULL.
+	 * The test must stay inside that lock; it used to be reached through
+	 * the caller, which holds it.
+	 */
 	if (!memcg || !zram || !zram->infos) {
 		hybp(HYB_ERR, "invalid zram or mcg_hyb\n");
 		return;
@@ -4712,12 +4888,41 @@ static bool hybridswap_global_setting_init(struct zram *zram)
 	if (unlikely(global_settings.stat))
 		return false;
 
+	/*
+	 * Fresh I/O refcount for this binding.  percpu_ref_kill() is
+	 * irreversible - a killed refcount never comes back to life - and
+	 * hybridswap_zram_teardown() kills it, so a device that is unbound
+	 * and then bound again needs the refcount re-initialised here
+	 * rather than inherited.  Safe to do on every bind: the early return
+	 * above means this only runs when there is no live binding, and
+	 * hybridswap_loop_device_store() holds hybridswap_enable_lock across
+	 * this call, so no teardown can be mid-kill underneath it.
+	 *
+	 * The refcount's release callback only completes io_quiesced, so
+	 * re-arming it cannot free anything and needs no matching teardown.
+	 */
+	atomic_set(&global_settings.io_kill, 0);
+	percpu_ref_init(&global_settings.io_refs, hybridswap_io_release, 0,
+			GFP_KERNEL);
+	init_completion(&global_settings.io_quiesced);
+
 	global_settings.zram = zram;
 	hybridswap_set_enable(false);
 	global_settings.stat = hybridswap_malloc(
 			sizeof(struct hybstatus), false, true);
 	if (unlikely(!global_settings.stat)) {
 		hybp(HYB_ERR, "global stat allocation failed!\n");
+		/*
+		 * Undo the publish as well.  global_settings.zram is one of
+		 * the three terms hybridswap_zram_bound() tests, and
+		 * hybridswap_io_work_end() only calls the deinit when
+		 * hyb_io_work_begin_flag or global_settings.stat is set -
+		 * neither is here - so leaving it published would keep a
+		 * device permanently "bound" to a struct zram it is not
+		 * using, and keep that pointer alive past the device's free.
+		 */
+		global_settings.zram = NULL;
+
 		return false;
 	}
 
@@ -4728,6 +4933,7 @@ static bool hybridswap_global_setting_init(struct zram *zram)
 		hybp(HYB_ERR, "reclaim workqueue allocation failed!\n");
 		hybridswap_free(global_settings.stat);
 		global_settings.stat = NULL;
+		global_settings.zram = NULL;
 
 		return false;
 	}
@@ -4874,6 +5080,188 @@ void hybridswap_exit_core(void)
 		hybridswap_manager_deinit(zram);
 		hybridswap_unbind_bdev(zram);
 	}
+}
+
+/*
+ * Release everything hybridswap holds for one zram, so the device can be
+ * removed or reset.  Called with zram->init_lock already held for write by
+ * zram_remove()/zram_reset_device(), which is what makes the whole thing
+ * deadlock-free: the only lock taken here is hybridswap_enable_lock, and
+ * init_lock -> enable_lock is the order hybridswap_loop_device_store()
+ * already establishes and the one hybridswap_zram_bound() relies on.  The
+ * obvious alternative - a sysfs write that drops enable_lock before
+ * unbind_bdev() takes init_lock - is the inverse and wedges against a
+ * concurrent hot_remove, which holds init_lock and wants enable_lock.
+ *
+ * The claim zram_remove() holds is what keeps the device alive across this:
+ * a second remove refuses on it, so nothing can kfree() the struct zram
+ * under us.
+ *
+ * Order is load-bearing, and mirrors hybridswap_exit():
+ *   swapd_exit() first, because the swapd kthreads dereference
+ *     global_settings.stat and swapd_zram, which the teardown below frees;
+ *   io_kill then the refcount kill before anything is torn down, so no
+ *     I/O chain can reach the tables or the loop device after this point;
+ *   flush_workqueue() for the reclaim worker, which is the only submitter
+ *     that is not already inside the gate;
+ *   the bio drain before io_work_end(), because a bio completes in the
+ *     loop driver's context, which destroy_workqueue() does not drain, and
+ *     hybridswap_end_io() would otherwise queue onto a NULL workqueue;
+ *   the loop device last, after nothing can resolve an eswap through it.
+ */
+int hybridswap_zram_teardown(struct zram *zram)
+{
+	struct workqueue_struct *reclaim_wq;
+
+	if (!hybridswap_zram_bound(zram))
+		return 0;
+
+	lockdep_assert_held(&zram->init_lock);
+
+	mutex_lock(&hybridswap_enable_lock);
+
+	/*
+	 * Scoped to the device named by the caller.  Re-tested under the
+	 * lock because zram_remove() read it before taking it: a sysfs
+	 * disable may have unbound in between, in which case there is
+	 * nothing here to do and reporting success is right.
+	 */
+	if (global_settings.zram != zram) {
+		mutex_unlock(&hybridswap_enable_lock);
+		return 0;
+	}
+
+	/*
+	 * The kill below is one-shot - percpu_ref_kill_and_confirm() warns
+	 * if called twice and, worse, io_quiesced has already been completed
+	 * by the first attempt, so a retry would sail past the very wait
+	 * that timed out and go on to free the tables with a chain the first
+	 * attempt proved was still alive.  Refuse instead.
+	 *
+	 * The consequence is that once a teardown has been attempted against
+	 * this device and abandoned, the device stays unremovable until it
+	 * is rebound: percpu_ref_kill() is irreversible, so a live refcount
+	 * cannot be reconstructed without hybridswap_global_setting_init(),
+	 * and that is only reached from hybridswap_loop_device_store(), and
+	 * only once global_settings.stat has been cleared.  Neither the
+	 * enable knob nor a plain retry gets there.  This is no worse than
+	 * the -EBUSY this teardown replaced - a wedged backing device was
+	 * never removable - but it is not something the caller can retry
+	 * its way out of.
+	 */
+	if (atomic_read(&global_settings.io_kill)) {
+		hybp(HYB_WARN, "teardown already attempted, refusing retry\n");
+		mutex_unlock(&hybridswap_enable_lock);
+		return -EBUSY;
+	}
+
+#ifdef CONFIG_HYBRIDSWAP_SWAPD
+	if (hybridswap_swapd_zram() == zram)
+		swapd_exit();
+	else if (hybridswap_swapd_enabled()) {
+		/*
+		 * swapd is bound to a different device.  Its kthreads are the
+		 * only thing that queues onto reclaim_wq, and the drain below
+		 * is only safe because nothing can queue behind it - so with
+		 * swapd still running the flush is a snapshot, not a barrier,
+		 * and a work item queued just after it would block in
+		 * hybridswap_init_plug() on the write side taken later, while
+		 * destroy_workqueue() inside io_work_end() waits for that very
+		 * item.  Refuse rather than deadlock.  Unreachable with a
+		 * single zram, where swapd_zram is either this device or NULL.
+		 */
+		hybp(HYB_WARN, "swapd bound elsewhere, refusing teardown\n");
+		mutex_unlock(&hybridswap_enable_lock);
+		return -EBUSY;
+	}
+#endif
+
+	/* Stop new work being queued before anything it could reach goes. */
+	hybridswap_core_disable();
+
+	/*
+	 * Stop new I/O chains and tell the ones already running to give up.
+	 *
+	 * The flag goes first and the kill second, and the order matters:
+	 * the flag is what a chain parked in hybridswap_wait_io_finish()
+	 * tests to decide to let go of its reference, so it has to be
+	 * visible before the kill stops anyone new.  Both are set before
+	 * anything is drained, so a chain that starts at any point from
+	 * here either fails tryget_live() or bails out of its wait.
+	 *
+	 * kill_and_confirm(), not kill(): the acquire side uses
+	 * percpu_ref_tryget_live(), whose documented guarantee that it fails
+	 * after a kill comes from the completion of the kill's switch to
+	 * atomic mode, which is what _and_confirm() waits for.
+	 */
+	atomic_set(&global_settings.io_kill, 1);
+	percpu_ref_kill_and_confirm(&global_settings.io_refs, NULL);
+
+	/*
+	 * Drain the reclaim worker next.  Its items take a reference in
+	 * hybridswap_init_plug() and can be parked in
+	 * hybridswap_wait_io_finish(), but both are now abortable, so this
+	 * flush terminates: an item either finishes its I/O or observes
+	 * io_kill within one poll interval and returns.  It has to come
+	 * before the completion wait below, because a reclaim item that is
+	 * still running is one of the reference holders being waited on.
+	 */
+	reclaim_wq = global_settings.reclaim_wq;
+	if (reclaim_wq)
+		flush_workqueue(reclaim_wq);
+
+	/*
+	 * Now wait for the last reference to be dropped.  Every chain has
+	 * either completed or given up, and hybridswap_io_release() will
+	 * have run by the time this returns.
+	 *
+	 * Bounded defensively only.  The unbounded part of the wait was
+	 * hybridswap_wait_io_finish(), which io_kill has already made
+	 * abortable, so this should not be able to time out - but it is the
+	 * one wait standing between the teardown and freeing state, and the
+	 * caller is holding zram->init_lock and the device claim, so
+	 * refusing is still better than wedging the device in D-state.
+	 *
+	 * Note also that an abandoned teardown leaves the device bound but
+	 * inert: swapd is stopped, the core is disabled and io_kill is set,
+	 * while the tables and the loop device are intact.  Since io_kill
+	 * cannot be unset, hybridswap has to be re-initialised - a disable
+	 * then enable cycle - before the device can reclaim again.
+	 */
+	if (!wait_for_completion_timeout(&global_settings.io_quiesced,
+				HYBRIDSWAP_TEARDOWN_TIMEOUT)) {
+		hybp(HYB_WARN, "teardown gave up waiting for I/O chains\n");
+		mutex_unlock(&hybridswap_enable_lock);
+		return -EBUSY;
+	}
+
+	/*
+	 * No chain can submit now, so the only bios left are the ones
+	 * already with the loop device.  Waiting for the last of them is
+	 * what lets io_work_end() destroy the workqueues safely - without
+	 * it a bio completing afterwards would queue onto a workqueue that
+	 * had just been destroyed and NULLed.  These can genuinely outlive
+	 * their chain if the backing device is wedged, which is what the
+	 * bound is for.
+	 */
+	if (!wait_event_timeout(hybridswap_bio_idle_wq,
+				!atomic_read(&hybridswap_bio_inflight),
+				HYBRIDSWAP_TEARDOWN_TIMEOUT)) {
+		hybp(HYB_WARN, "teardown gave up waiting for %d bio(s)\n",
+				atomic_read(&hybridswap_bio_inflight));
+		mutex_unlock(&hybridswap_enable_lock);
+		return -EBUSY;
+	}
+
+	if (hyb_io_work_begin_flag || global_settings.stat)
+		hybridswap_io_work_end();
+
+	hybridswap_manager_deinit(zram);
+	hybridswap_unbind_bdev_locked(zram);
+
+	mutex_unlock(&hybridswap_enable_lock);
+
+	return 0;
 }
 
 struct workqueue_struct *hybridswap_fetch_reclaim_workqueue(void)
@@ -5556,6 +5944,27 @@ static void *hybridswap_init_plug(struct zram *zram,
 		struct io_work_arg *iowork)
 {
 	struct hybridswap_io io_para;
+	void *iohandle;
+
+	/*
+	 * The single entry point for every context that can submit a bio to
+	 * the loop device, so this is the only place the I/O reference has
+	 * to be taken.  Held across the whole chain, not just the submit: the
+	 * teardown frees the tables and the backing device at the far end,
+	 * and what has to be excluded is any chain that could still reach
+	 * them, not merely the instant submit_bio() is called.
+	 *
+	 * tryget_live(), not tryget(): the teardown's kill is what makes
+	 * this fail, and per the percpu_ref contract that guarantee needs
+	 * percpu_ref_kill_and_confirm() on the other side rather than a
+	 * plain percpu_ref_kill().  A plain core_enabled() check here would
+	 * be check-then-act - a fault could pass it, the teardown could
+	 * drain, and this could then submit against freed tables.
+	 */
+	if (!percpu_ref_tryget_live(&global_settings.io_refs)) {
+		hybp(HYB_DEBUG, "io not live, refusing new chain\n");
+		return NULL;
+	}
 
 	/*
 	 * Hold the tables alive for as long as this I/O chain can
@@ -5565,8 +5974,10 @@ static void *hybridswap_init_plug(struct zram *zram,
 	 * error callbacks) has finished touching the tables.
 	 */
 	iowork->infos = hyb_info_get(zram);
-	if (!iowork->infos)
+	if (!iowork->infos) {
+		percpu_ref_put(&global_settings.io_refs);
 		return NULL;
+	}
 
 	io_para.bdev = zram->bdev;
 	io_para.class = class;
@@ -5606,7 +6017,11 @@ static void *hybridswap_init_plug(struct zram *zram,
 	iowork->io_buf.zram = zram;
 	iowork->data.zram = zram;
 	iowork->data.class = io_para.class;
-	return hybridswap_plug_start(&io_para);
+	iohandle = hybridswap_plug_start(&io_para);
+	if (unlikely(!iohandle))
+		percpu_ref_put(&global_settings.io_refs);
+
+	return iohandle;
 }
 
 static void hybridswap_fill_entry(struct hybridswap_entry *ioentry,

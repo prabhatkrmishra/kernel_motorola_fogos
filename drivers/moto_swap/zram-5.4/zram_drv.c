@@ -882,6 +882,20 @@ void hybridswap_unbind_bdev(struct zram *zram)
 	reset_bdev(zram);
 	up_write(&zram->init_lock);
 }
+
+/*
+ * For callers that already hold init_lock for write, which is the case for
+ * both teardown sites: zram_remove() and zram_reset_device() take it before
+ * they ask hybridswap to unbind, so going back through
+ * hybridswap_unbind_bdev() would take a non-recursive rwsem a second time
+ * and self-deadlock.  The assertion is the contract that keeps the two
+ * from drifting apart.
+ */
+void hybridswap_unbind_bdev_locked(struct zram *zram)
+{
+	lockdep_assert_held(&zram->init_lock);
+	reset_bdev(zram);
+}
 #else
 static inline void reset_bdev(struct zram *zram) {};
 #endif
@@ -1935,23 +1949,24 @@ static int zram_reset_device(struct zram *zram)
 	down_write(&zram->init_lock);
 
 	/*
-	 * The gate zram_remove() has, and for the same reason: this runs
-	 * the identical zram_meta_free() teardown, and zram_free_page()
-	 * ends up in hybridswap_swap_sorted_list_del(), which destroys the
-	 * swap maps of every ZRAM_WB page.  Unlike zram_remove() nothing
-	 * is freed here, so hybridswap would survive the reset - but its
-	 * tables and the per-memcg hybs->zram pointers would still
-	 * describe slots whose metadata table and zsmalloc pool this call
-	 * has just released, and which the next disksize write allocates
-	 * fresh ones over.  Refusing is the only way to keep the two
-	 * views of the device consistent.
+	 * hybridswap has to let go of the device before this runs, for the
+	 * same reason zram_remove() insists: both call the identical
+	 * zram_meta_free() teardown, and zram_free_page() ends up in
+	 * hybridswap_swap_sorted_list_del(), which destroys the swap maps of
+	 * every ZRAM_WB page.  hybridswap would survive the reset - unlike a
+	 * remove - but its tables and the per-memcg hybs->zram pointers
+	 * would still describe slots whose metadata table and zsmalloc pool
+	 * this call is about to release, and which the next disksize write
+	 * allocates fresh ones over.  So the binding is released here rather
+	 * than merely refused: the teardown quiesces hybridswap's submitters,
+	 * drains its I/O, detaches the tables and releases the loop device,
+	 * and by the time it returns the two views agree again.
 	 */
 #ifdef CONFIG_HYBRIDSWAP_CORE
-	if (hybridswap_zram_bound(zram)) {
+	ret = hybridswap_zram_teardown(zram);
+	if (ret)
 		pr_err("Cannot reset %s: still bound to hybridswap\n",
 				zram->disk->disk_name);
-		ret = -EBUSY;
-	}
 #endif
 
 	if (!ret)
@@ -2352,23 +2367,19 @@ static int zram_remove(struct zram *zram)
 	 * swapd_zram on their next round, and every eswap request still
 	 * holding a zram pointer would fault.
 	 *
-	 * This is a refusal, not a cleanup: the only things done so far
-	 * are the claim and the debugfs node, and the branch undoes both,
-	 * so the caller keeps a usable device and can retry.  Note that
-	 * the core-side bindings are only released when the core is torn
-	 * down - the sysfs enable knobs clear the enable flag but leave
-	 * the loop device bound and zram->infos published - while the
-	 * swapd binding goes away with hybridswap_disable().  So a core-
-	 * bound device stays -EBUSY until teardown, and a swapd-only one
-	 * until the enable knob is cleared.  That is the intended trade:
-	 * leaking one device beats handing hybridswap a freed struct
-	 * zram.  Module exit is the backstop: zram_exit() runs
-	 * hybridswap_exit(), whose swapd_exit() and
-	 * hybridswap_exit_core() clear all of them before
-	 * destroy_devices() gets here.
+	 * Rather than refuse, release the binding.  The only things done so
+	 * far are the claim and the debugfs node, so undoing them on the
+	 * failure path below still leaves the caller a usable device it can
+	 * retry with.  The teardown needs the claim to still be held: it is
+	 * what stops a second remove from racing the struct zram free, and
+	 * it is why the claim is not dropped before hybridswap_zram_teardown()
+	 * runs.  hybridswap_zram_teardown() quiesces every submitter, drains
+	 * the bios it has in flight, detaches the tables and releases the
+	 * loop device, so by the time it returns none of the three bindings
+	 * that used to make this -EBUSY is left set.
 	 */
 #ifdef CONFIG_HYBRIDSWAP_CORE
-	if (hybridswap_zram_bound(zram)) {
+	if (hybridswap_zram_teardown(zram)) {
 		pr_err("Cannot remove %s: still bound to hybridswap\n",
 				zram->disk->disk_name);
 		up_write(&zram->init_lock);

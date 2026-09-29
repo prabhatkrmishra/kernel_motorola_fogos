@@ -31,6 +31,14 @@ extern bool hybridswap_zram_bound(struct zram *zram);
 extern int hybridswap_page_fault(struct zram *zram, u32 index);
 extern bool hybridswap_delete(struct zram *zram, u32 index);
 
+/*
+ * Release everything hybridswap holds for this device.  Called by
+ * zram_remove() and zram_reset_device() with zram->init_lock already held
+ * for write, and returns 0 once hybridswap_zram_bound() would be false, so
+ * the caller proceeds; a non-zero return means the device is still bound.
+ */
+extern int hybridswap_zram_teardown(struct zram *zram);
+
 /* Slot waits that gave up with a completer still holding the slot. */
 extern atomic64_t hybridswap_slot_stuck;
 

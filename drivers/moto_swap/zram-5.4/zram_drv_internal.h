@@ -8,8 +8,10 @@
 #ifdef CONFIG_HYBRIDSWAP_CORE
 struct zram;
 void hybridswap_unbind_bdev(struct zram *zram);
+void hybridswap_unbind_bdev_locked(struct zram *zram);
 #else
 static inline void hybridswap_unbind_bdev(struct zram *zram) { }
+static inline void hybridswap_unbind_bdev_locked(struct zram *zram) { }
 #endif
 
 #define zram_slot_lock(zram, index) (bit_spin_lock(ZRAM_LOCK, &zram->table[index].flags))
