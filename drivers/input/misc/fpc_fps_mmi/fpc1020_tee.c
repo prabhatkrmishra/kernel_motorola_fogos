@@ -677,12 +677,6 @@ static int fpc1020_probe(struct platform_device *pdev)
             fpc_pinctrl_on(dev);
 	}
   #endif
-	rc = FPS_init(dev);
-	if (rc) {
-		dev_err(dev, "FPS notifier init failed: %d\n", rc);
-		goto exit;
-	}
-
 	fpc1020->dev = dev;
 #ifdef CONFIG_INPUT_MISC_FPC1020_SAVE_TO_CLASS_DEVICE
 	fpc1020->class_minor = -1;
@@ -801,6 +795,28 @@ static int fpc1020_probe(struct platform_device *pdev)
 		goto irq_exit;
 	}
 	dev_dbg(dev, "requested irq %d\n", gpio_to_irq(fpc1020->irq_gpio));
+
+	/*
+	 * Published last, once nothing below can fail.  The object is a
+	 * module-wide global that FPS_init() refuses to overwrite, so
+	 * publishing it before the gpio and irq setup left a failed probe
+	 * with fpsData still set and its reference never dropped: nothing
+	 * on the error paths below withdrew it, and remove() does not run
+	 * when probe fails.  A retry then saw a non-NULL fpsData and took
+	 * -EBUSY, turning a -EPROBE_DEFER into a permanent probe failure.
+	 *
+	 * Nothing between here and the sysfs group or the irq handler reads
+	 * fpsData: the handler only bumps irq_cnt and calls sysfs_notify,
+	 * and the one sysfs writer goes through FPS_notify(), which takes
+	 * the NULL path from fps_data_get().  On failure the reference is
+	 * ours and unwound by returning; devm releases the irq, the sysfs
+	 * group and the regulator, and fpc1020_remove() is not involved.
+	 */
+	rc = FPS_init(dev);
+	if (rc) {
+		dev_err(dev, "FPS notifier init failed: %d\n", rc);
+		return rc;
+	}
 
 	/* Request that the interrupt should be wakeable */
 	enable_irq_wake(gpio_to_irq(fpc1020->irq_gpio));
