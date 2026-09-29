@@ -542,7 +542,7 @@ static int cam_icp_remove_ctx_bw(struct cam_icp_hw_mgr *hw_mgr,
 				CAM_AXI_PATH_DATA_IPE_START_OFFSET;
 			}
 
-			if (path_index >= CAM_ICP_MAX_PER_PATH_VOTES) {
+			if (path_index < 0 || path_index >= CAM_ICP_MAX_PER_PATH_VOTES) {
 				CAM_WARN(CAM_PERF,
 				"Invalid path %d, start offset=%d, max=%d",
 				ctx_data->clk_info.axi_path[i].path_data_type,
@@ -1162,7 +1162,7 @@ static bool cam_icp_update_bw_v2(struct cam_icp_hw_mgr *hw_mgr,
 				CAM_AXI_PATH_DATA_IPE_START_OFFSET;
 		}
 
-		if (path_index >= CAM_ICP_MAX_PER_PATH_VOTES) {
+		if (path_index < 0 || path_index >= CAM_ICP_MAX_PER_PATH_VOTES) {
 			CAM_WARN(CAM_PERF,
 				"Invalid path %d, start offset=%d, max=%d",
 				ctx_data->clk_info.axi_path[i].path_data_type,
@@ -1206,7 +1206,7 @@ static bool cam_icp_update_bw_v2(struct cam_icp_hw_mgr *hw_mgr,
 				CAM_AXI_PATH_DATA_IPE_START_OFFSET;
 		}
 
-		if (path_index >= CAM_ICP_MAX_PER_PATH_VOTES) {
+		if (path_index < 0 || path_index >= CAM_ICP_MAX_PER_PATH_VOTES) {
 			CAM_WARN(CAM_PERF,
 				"Invalid path %d, start offset=%d, max=%d",
 				ctx_data->clk_info.axi_path[i].path_data_type,
