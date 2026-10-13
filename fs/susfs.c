@@ -8,6 +8,7 @@
 #include <linux/list.h>
 #include <linux/rculist.h>
 #include <linux/init_task.h>
+#include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/stat.h>
 #include <linux/uaccess.h>
@@ -800,7 +801,6 @@ void susfs_set_log(bool enabled) {
 
 /* spoof_cmdline_or_bootconfig */
 #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-#include <linux/mutex.h>
 static char *fake_cmdline_or_bootconfig = NULL;
 /* strncpy_from_user() may sleep while faulting in the user string, and
  * the proc show reader sleeps as well, so guard this buffer with a mutex
