@@ -9,6 +9,10 @@ ifdef CONFIG_UBSAN_BOUNDS
       CFLAGS_UBSAN += $(call cc-option, -fsanitize=bounds)
 endif
 
+ifdef CONFIG_UBSAN_TRAP
+      CFLAGS_UBSAN += $(call cc-option, -fsanitize-undefined-trap-on-error)
+endif
+
 ifdef CONFIG_UBSAN_MISC
       CFLAGS_UBSAN += $(call cc-option, -fsanitize=shift)
       CFLAGS_UBSAN += $(call cc-option, -fsanitize=integer-divide-by-zero)
