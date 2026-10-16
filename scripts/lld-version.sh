@@ -5,6 +5,12 @@
 
 set -e
 
+# If no linker is specified (e.g. running conf standalone), report 0.
+if [ $# -eq 0 ]; then
+	echo 0
+	exit 0
+fi
+
 # Convert the version string x.y.z to a canonical 5 or 6-digit form.
 get_canonical_version()
 {
